@@ -1,0 +1,28 @@
+{
+  "mumu": {
+    "path": "D:/MuMu",
+    "manager": "D:/MuMu/nx_main/MuMuManager.exe",
+    "adb": "D:/MuMu/nx_main/adb.exe",
+    "basePort": 16384,
+    "portStep": 32
+  },
+  "game": {
+    "package": "com.gof.china"
+  },
+  "runtime": {
+    "shortSide": 720,
+    "launchTimeoutMs": 90000,
+    "taskTimeoutMs": 600000,
+    "saveDraws": false,
+    "saveOnError": true,
+    "saveFailureShot": false,
+    "logLevel": "info"
+  },
+  "instances": [
+    {
+      "index": 0,
+      "enabled": true,
+      "tasks": []
+    }
+  ]
+}

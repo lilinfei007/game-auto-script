@@ -1,0 +1,62 @@
+{
+  "等待画面稳定": {
+    "recognition": {
+      "type": "DirectHit",
+      "param": {}
+    },
+    "action": {
+      "type": "DoNothing",
+      "param": {}
+    },
+    "pre_wait_freezes": 2500,
+    "next": []
+  },
+
+  "通用弹窗处理": {
+    "recognition": {
+      "type": "OCR",
+      "param": {
+        "expected": "^(确定|确认|关闭|取消|我知道了|知道了|重试|稍后再说|不再提示|同意|允许)$",
+        "roi": [0, 0, 0, 0]
+      }
+    },
+    "action": {
+      "type": "Click",
+      "param": {}
+    },
+    "max_hit": 30,
+    "next": []
+  },
+
+  "主界面标记": {
+    "recognition": {
+      "type": "OCR",
+      "param": {
+        "expected": "^野外$",
+        "roi": [595, 1225, 125, 55]
+      }
+    },
+    "action": {
+      "type": "DoNothing",
+      "param": {}
+    },
+    "next": []
+  },
+
+  "回到主界面": {
+    "recognition": {
+      "type": "DirectHit",
+      "param": {}
+    },
+    "action": {
+      "type": "Custom",
+      "param": {
+        "custom_action": "wjdr_ensure_home",
+        "custom_action_param": {
+          "maxAttempts": 6
+        }
+      }
+    },
+    "next": []
+  }
+}

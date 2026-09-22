@@ -1,0 +1,54 @@
+{
+  "启动游戏": {
+    "recognition": {
+      "type": "DirectHit",
+      "param": {}
+    },
+    "action": {
+      "type": "StartApp",
+      "param": {
+        "package": "TODO_SET_ME"
+      }
+    },
+    "next": [
+      "[JumpBack]通用弹窗处理",
+      "等待游戏加载"
+    ]
+  },
+
+  "等待游戏加载": {
+    "recognition": {
+      "type": "DirectHit",
+      "param": {}
+    },
+    "action": {
+      "type": "DoNothing",
+      "param": {}
+    },
+    "pre_wait_freezes": 2000,
+    "post_delay": 1000,
+    "timeout": 120000,
+    "next": [
+      "[JumpBack]通用弹窗处理",
+      "确认主界面"
+    ],
+    "on_error": [
+      "回到主界面"
+    ]
+  },
+
+  "确认主界面": {
+    "recognition": {
+      "type": "OCR",
+      "param": {
+        "expected": "^野外$",
+        "roi": [595, 1225, 125, 55]
+      }
+    },
+    "action": {
+      "type": "DoNothing",
+      "param": {}
+    },
+    "next": []
+  }
+}

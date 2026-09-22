@@ -1,0 +1,23 @@
+{
+  "回放测试": {
+    "action": { "type": "Click", "param": { "target": [360, 640] } },
+    "next": ["回放测试_按键"]
+  },
+  "回放测试_按键": {
+    "action": { "type": "ClickKey", "param": { "key": 4 } },
+    "next": ["回放测试_截图"]
+  },
+  "回放测试_截图": {
+    "recognition": { "type": "DirectHit" },
+    "action": { "type": "DoNothing" },
+    "next": ["回放测试_点两下"]
+  },
+  "回放测试_点两下": {
+    "action": { "type": "Click", "param": { "target": [100, 200] } },
+    "next": ["回放测试_结束"]
+  },
+  "回放测试_结束": {
+    "recognition": { "type": "DirectHit" },
+    "action": { "type": "DoNothing" }
+  }
+}

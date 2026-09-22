@@ -1,0 +1,25 @@
+{
+  "name": "game-auto-script",
+  "version": "0.1.0",
+  "private": true,
+  "description": "《无尽冬日》日常任务自动化 —— MaaFramework + MuMu 模拟器（自研 Node 应用）",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "doctor": "node src/index.mjs doctor",
+    "run": "node src/index.mjs run",
+    "list": "node src/index.mjs list",
+    "capture": "node src/index.mjs capture",
+    "ui": "node src/index.mjs ui",
+    "record": "node src/index.mjs record",
+    "replay": "node src/index.mjs replay",
+    "selftest:replay": "node tools/selftest-replay.mjs --replay-only",
+    "fetch-assets": "node tools/fetch-assets.mjs",
+    "test": "node test/run.mjs"
+  },
+  "dependencies": {
+    "@maaxyz/maa-node": "5.13.1"
+  }
+}

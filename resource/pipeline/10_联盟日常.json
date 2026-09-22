@@ -1,0 +1,238 @@
+{
+  "联盟日常": {
+    "recognition": {
+      "type": "DirectHit",
+      "param": {}
+    },
+    "action": {
+      "type": "Custom",
+      "param": {
+        "custom_action": "wjdr_ensure_home",
+        "custom_action_param": {
+          "maxAttempts": 6
+        }
+      }
+    },
+    "next": [
+      "[JumpBack]通用弹窗处理",
+      "联盟日常_进入联盟"
+    ],
+    "on_error": [
+      "回到主界面"
+    ]
+  },
+
+  "联盟日常_进入联盟": {
+    "recognition": {
+      "type": "OCR",
+      "param": {
+        "expected": "^联盟$",
+        "roi": [490, 1225, 90, 55]
+      }
+    },
+    "action": {
+      "type": "Click",
+      "param": {}
+    },
+    "post_delay": 1200,
+    "next": [
+      "[JumpBack]通用弹窗处理",
+      "联盟日常_点互助"
+    ],
+    "on_error": [
+      "回到主界面"
+    ]
+  },
+
+  "联盟日常_点互助": {
+    "recognition": {
+      "type": "OCR",
+      "param": {
+        "expected": "^联盟互助$",
+        "roi": [505, 1035, 165, 65]
+      }
+    },
+    "action": {
+      "type": "Click",
+      "param": {}
+    },
+    "post_delay": 1500,
+    "next": [
+      "[JumpBack]通用弹窗处理",
+      "联盟日常_互助无需求",
+      "联盟日常_全部帮助"
+    ],
+    "on_error": [
+      "回到主界面"
+    ]
+  },
+
+  "联盟日常_互助无需求": {
+    "recognition": {
+      "type": "OCR",
+      "param": {
+        "expected": "暂时没有盟友需要帮助",
+        "roi": [200, 600, 330, 70]
+      }
+    },
+    "action": {
+      "type": "DoNothing",
+      "param": {}
+    },
+    "next": [
+      "联盟日常_返回联盟"
+    ]
+  },
+
+  "联盟日常_全部帮助": {
+    "recognition": {
+      "type": "OCR",
+      "param": {
+        "expected": "^全部帮助$",
+        "roi": [250, 1160, 220, 75]
+      }
+    },
+    "action": {
+      "type": "Click",
+      "param": {}
+    },
+    "post_delay": 2500,
+    "max_hit": 4,
+    "next": [
+      "[JumpBack]通用弹窗处理",
+      "联盟日常_记录互助奖励",
+      "联盟日常_返回联盟"
+    ],
+    "on_error": [
+      "联盟日常_返回联盟"
+    ]
+  },
+
+  "联盟日常_记录互助奖励": {
+    "recognition": {
+      "type": "Custom",
+      "param": {
+        "custom_recognition": "wjdr_read_count",
+        "custom_recognition_param": {
+          "roi": [300, 150, 160, 50],
+          "expected": "\\d[\\d,]*/\\d[\\d,]*"
+        }
+      }
+    },
+    "action": {
+      "type": "DoNothing",
+      "param": {}
+    },
+    "next": [
+      "联盟日常_返回联盟"
+    ]
+  },
+
+  "联盟日常_返回联盟": {
+    "recognition": {
+      "type": "DirectHit",
+      "param": {}
+    },
+    "action": {
+      "type": "ClickKey",
+      "param": {
+        "key": 4
+      }
+    },
+    "post_delay": 1200,
+    "next": [
+      "[JumpBack]通用弹窗处理",
+      "联盟日常_进入宝箱"
+    ],
+    "on_error": [
+      "回到主界面"
+    ]
+  },
+
+  "联盟日常_进入宝箱": {
+    "recognition": {
+      "type": "OCR",
+      "param": {
+        "expected": "^联盟宝箱$",
+        "roi": [505, 635, 165, 65]
+      }
+    },
+    "action": {
+      "type": "Click",
+      "param": {}
+    },
+    "post_delay": 1500,
+    "next": [
+      "[JumpBack]通用弹窗处理",
+      "联盟日常_领盟友赠礼",
+      "联盟日常_切战利品页"
+    ],
+    "on_error": [
+      "回到主界面"
+    ]
+  },
+
+  "联盟日常_领盟友赠礼": {
+    "recognition": {
+      "type": "OCR",
+      "param": {
+        "expected": "一?键领取|^领取$",
+        "roi": [270, 1165, 220, 80]
+      }
+    },
+    "action": {
+      "type": "Click",
+      "param": {}
+    },
+    "post_delay": 1800,
+    "next": [
+      "[JumpBack]通用弹窗处理",
+      "联盟日常_切战利品页"
+    ]
+  },
+
+  "联盟日常_切战利品页": {
+    "recognition": {
+      "type": "OCR",
+      "param": {
+        "expected": "^战利品宝箱$",
+        "roi": [100, 370, 180, 60]
+      }
+    },
+    "action": {
+      "type": "Click",
+      "param": {}
+    },
+    "post_delay": 1200,
+    "next": [
+      "[JumpBack]通用弹窗处理",
+      "联盟日常_领战利品"
+    ],
+    "on_error": [
+      "回到主界面"
+    ]
+  },
+
+  "联盟日常_领战利品": {
+    "recognition": {
+      "type": "OCR",
+      "param": {
+        "expected": "一?键领取|^领取$",
+        "roi": [270, 1165, 220, 80]
+      }
+    },
+    "action": {
+      "type": "Click",
+      "param": {}
+    },
+    "post_delay": 2000,
+    "max_hit": 4,
+    "next": [
+      "[JumpBack]通用弹窗处理",
+      "回到主界面"
+    ],
+    "on_error": [
+      "回到主界面"
+    ]
+  }
+}
