@@ -13,5 +13,8 @@ dist/
 resource/model/ocr/
 docs/reference/
 
+# 个人任务集（界面里编排出来的「我要跑什么」，跟玩法绑定，不随仓库分发）
+config/tasks.json
+
 # 截图原始素材（由 tools/capture.mjs 生成，仅保留裁剪后的模板）
 resource/image/_raw/

@@ -61,9 +61,21 @@ node src/index.mjs capture --count 5     # 采图供裁剪模板
 | `node src/index.mjs run [--instance N] [--tasks a,b]` | 执行任务 |
 | `node src/index.mjs list` | 列出实例、流水线文件与关键配置 |
 | `node src/index.mjs capture [--count N] [--tag T]` | 批量截图到 `resource/image/_raw/<T>/` |
-| `node src/index.mjs ui [--port N] [--open]` | 本地 Web UI：实时事件流（SSE）、任务启停、日志查看 |
+| `node src/index.mjs ui [--port N] [--open]` | 本地 Web UI：实时事件流（SSE）、任务启停、实时画面、任务集编排、pipeline 编辑、定时 |
 | `node src/index.mjs record <文件>` | 录制一次真实操作，供离线回放 |
 | `node src/index.mjs replay <文件>` | 离线回放回归，不需要模拟器 |
+
+`ui` 的额外开关：
+
+| 开关 | 作用 |
+|---|---|
+| `--open` | 启动后自动打开浏览器 |
+| `--no-schedule` | 本次不执行任何定时任务（只想开着界面时用） |
+| `--allow-remote` | 允许局域网访问；**会自动生成写操作令牌并打印**，写接口需要请求头 `X-Token` |
+| `--token VALUE` | 配合 `--allow-remote` 指定令牌（不给则自动生成） |
+
+界面里的写操作还有 `Origin` 校验（防 DNS rebinding）：浏览器从非本机页面发起的
+写请求一律 403。`GET` 不校验令牌，所以局域网里只读实时画面是被允许的。
 
 ### 诊断工具（`tools/`）
 
@@ -92,13 +104,19 @@ node tools/explore.mjs --key 4 --wait 1500          # 按返回键
 
 ```
 src/
-  index.mjs         CLI 入口（doctor / run / list / capture）
-  config.mjs        配置加载、校验、实例→端口映射
+  index.mjs         CLI 入口（doctor / run / list / capture / ui / record / replay）
+  config.mjs        配置加载、校验、实例→端口映射、运行时参数覆盖
   runtime.mjs       MaaFramework 全局选项初始化（CLI 与 tools 共用）
   device.mjs        MuMu 实例生命周期（MuMuManager）+ adb 健康检查
   controller.mjs    AdbController 创建、EmulatorExtras 掩码与 extras 注入、截图
   resource.mjs      资源包加载 + 自定义识别/动作注册
-  runner.mjs        Tasker 编排、事件日志、失败留证
+  runner.mjs        Tasker 编排、事件日志、失败留证、单步超时
+  runner-web.mjs    Web 执行层：任务集/单节点执行、实时画面、手动操作、串行队列
+  task-config.mjs   任务集读写与纯逻辑（校验/排序/开关/解析）
+  pipeline-edit.mjs 流水线校验与安全写入（引用完整性、目录穿越防护、备份）
+  schedule.mjs      自带 5 段 cron 解析 + 调度器
+  web.mjs           本地 Web 服务：REST + SSE + 内联控制台页面
+  replay.mjs        离线录制 / 回放
   custom/
     reco.mjs        自定义识别：wjdr_read_count / wjdr_find_march_slot / wjdr_visible
     action.mjs      自定义动作：wjdr_pick_upgrade_target / wjdr_ensure_home /
@@ -106,6 +124,7 @@ src/
   util/
     detail.mjs      识别结果读取（RecoDetail 的两种形态）
     exec.mjs        外部命令封装（管道被禁时自动降级）
+    fsx.mjs         原子写 + 备份轮转
     image.mjs       图片尺寸解析与落盘
     png.mjs         零依赖 PNG 解码 / 像素统计 / 差异比较
     log.mjs         分级日志
@@ -114,10 +133,12 @@ resource/
   pipeline/               任务流水线 JSON
   image/                  模板素材（720 短边归一后裁剪；当前为空，走 OCR）
   model/ocr/              OCR 模型（由 fetch-assets 下载，不入库）
-config/config.json        实例、包名、运行参数
+config/config.json        设备与运行参数
+config/tasks.json         任务集（编排 / 顺序 / 开关 / 单步超时 / 定时；不入库）
 tools/                    诊断与编写工具
+docs/WEBUI.md             Web 接口契约与扩展指南
 docs/reference/           拉取的 v5.13.1 官方文档（不入库）
-debug/                    日志、失败截图、识别可视化、探索截图（不入库）
+debug/                    日志、失败截图、可视化、录制、自动备份、调度历史（不入库）
 dist/                     打包产物（由 build-portable.mjs 生成，不入库）
 test/                     单元测试（npm test）
 ```
