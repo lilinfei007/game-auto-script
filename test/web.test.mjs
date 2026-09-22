@@ -198,8 +198,10 @@ test('POST /api/run: 启动返回 202，运行中再启动返回 409', async () 
   assert.equal(r1.status, 202);
   const j1 = await r1.json();
   assert.equal(j1.started, true);
-  assert.deepEqual(j1.options.tasks, ['联盟日常']);
+  // 接口对外给的是「已解析的真实节点名」，顺序即执行顺序
+  assert.deepEqual(j1.options.entries, ['联盟日常']);
   assert.equal(j1.options.retry, 1);
+  assert.equal(j1.options.instance, 0);
 
   await waitFor(() => events.state.running, 'runner 应已进入运行态');
 
@@ -207,7 +209,48 @@ test('POST /api/run: 启动返回 202，运行中再启动返回 409', async () 
   assert.equal(r2.status, 409, '运行中不应允许再次启动');
   assert.match((await r2.json()).error, /已有任务在运行中/);
 
-  assert.deepEqual(runner.calls[before].tasks, ['联盟日常']);
+  assert.deepEqual(runner.calls[before].entries, ['联盟日常']);
+  await ensureIdle();
+});
+
+test('POST /api/run: steps 形态保留顺序与开关，并透传单步超时', async () => {
+  await ensureIdle();
+  const before = runner.calls.length;
+
+  const r = await post('/api/run', {
+    instance: 0,
+    steps: [
+      { entry: '回到主界面', enabled: true, timeoutMs: 1234 },
+      { entry: '联盟日常', enabled: false },
+      { entry: '启动游戏', enabled: true },
+    ],
+  });
+  assert.equal(r.status, 202);
+  const opts = (await r.json()).options;
+
+  assert.deepEqual(opts.entries, ['回到主界面', '启动游戏'], '关闭的步骤必须被剔除，顺序保持');
+  assert.deepEqual(opts.stepTimeouts, { 回到主界面: 1234 });
+  assert.deepEqual(runner.calls[before].entries, ['回到主界面', '启动游戏']);
+
+  await ensureIdle();
+});
+
+test('POST /api/run: 全部步骤关闭时返回 400 而不是空跑', async () => {
+  await ensureIdle();
+  const r = await post('/api/run', { steps: [{ entry: '联盟日常', enabled: false }] });
+  assert.equal(r.status, 400);
+  assert.match((await r.json()).error, /没有要执行的任务/);
+});
+
+test('POST /api/run: 无法识别的运行时参数被剔除，不会传进执行层', async () => {
+  await ensureIdle();
+  const before = runner.calls.length;
+  const r = await post('/api/run', {
+    tasks: ['联盟日常'],
+    runtime: { saveFailureShot: true, 乱写的: 1, taskTimeoutMs: 'x' },
+  });
+  assert.equal(r.status, 202);
+  assert.deepEqual(runner.calls[before].runtime, { saveFailureShot: true });
   await ensureIdle();
 });
 
@@ -363,13 +406,16 @@ test('POST /api/stop: 运行中能停止，随后状态回到空闲', async () =
   events.resetForTest();
 });
 
-test('POST /api/run: 未指定 tasks 时把 tasks 传成 undefined（交给自动发现）', async () => {
+test('POST /api/run: 未指定任务时按自动发现展开成真实节点名', async () => {
   await ensureIdle();
   const before = runner.calls.length;
   const r = await post('/api/run', { instance: 0 });
   assert.equal(r.status, 202);
-  assert.equal((await r.json()).options.tasks, undefined);
-  assert.equal(runner.calls[before].tasks, undefined);
+  const opts = (await r.json()).options;
+  // 自动发现会把模块按文件名顺序解析成入口节点（不是文件名）
+  assert.ok(Array.isArray(opts.entries) && opts.entries.length > 0, JSON.stringify(opts));
+  assert.deepEqual(runner.calls[before].entries, opts.entries);
+  assert.match(opts.source, /自动发现/);
   await ensureIdle();
 });
 

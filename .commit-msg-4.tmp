@@ -1,0 +1,28 @@
+refactor(平台): ui 命令改用新执行层，接口入参改为「已解析的入口列表」
+
+把 cmdUi 里那份内联 runner 换成 buildUiRunner 注入真实依赖，
+接口层不再自己决策「跑什么」，而是交给执行层统一处理。
+
+改动：
+- index.mjs
+    · 新增 buildUiRunner()：注入 instance/controller/resource/tasker/runTasks/
+      pipelineOverride/screencap/tap/swipe/runNodeImpl 等真实实现
+    · 配置改为可变闭包 + getConfig，为「界面改配置立即生效」打底
+    · cmdUi 不再自己组装 runner，也不再自己解析任务
+- web.mjs
+    · 新增 resolveRunPlan()：支持 steps（带开关/单步超时）、tasks、自动发现三种入参，
+      解析逻辑复用 cli-args.decideEntries，保证与 CLI 的优先级一致
+    · 阶段状态单一来源改为 events.ext.phase（删掉会漂移的 ctl.phase）
+    · buildState 增补 runtime / device / schedule / runs
+    · 运行时参数经 sanitizeRuntimeOverrides 过滤后才进执行层
+    · 空计划返回 400 而不是空跑
+- runner-web.mjs  execute() 就绪后回调 onReady，把阶段从 starting 切到 running
+
+测试：187 条全绿（新增 steps 入参、全关闭 400、运行时参数过滤三条用例）
+
+端到端实测（无模拟器环境）：
+- node src/index.mjs ui --port 18848 正常启动，/api/state 返回 200 且
+  模块、runtime、device、runs 字段齐备
+- 全部步骤关闭 → 400 且提示可读；空闲时停止 → 409；未知路由 → 404
+- 无模拟器时发起执行 → 202 后状态收敛为 failed，错误信息为
+  「MuMu 中不存在实例 0。请检查 mumu.manager 路径…」，run 记录被正确登记

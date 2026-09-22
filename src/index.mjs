@@ -14,9 +14,10 @@ import {
   pickInstances,
   resolveInstance,
   ensureDebugDirs,
+  applyRuntimeOverrides,
 } from './config.mjs';
 import { listInstances, ensureInstanceReady } from './device.mjs';
-import { createController, screencapToFile, decodeMethods } from './controller.mjs';
+import { createController, screencapToFile, screencap, decodeMethods } from './controller.mjs';
 import {
   createResource,
   listPipelineFiles,
@@ -26,6 +27,7 @@ import {
   validatePipelines,
 } from './resource.mjs';
 import { createTasker, runTasks, buildPipelineOverride } from './runner.mjs';
+import { createWebRunner } from './runner-web.mjs';
 import { initRuntime } from './runtime.mjs';
 import { createLogger, setLevel, setLogFile, closeLogFile, stamp } from './util/log.mjs';
 import { allOf, recognizeWithTasker } from './util/detail.mjs';
@@ -550,6 +552,67 @@ async function cmdReplay(config, args, logger) {
 
 // ---------------------------------------------------------------- ui
 
+/**
+ * 把真实依赖注入执行层。
+ *
+ * 这里只做「接线」：所有决策逻辑都在 runner-web.mjs 里，因此可以用假实现单测。
+ * `getConfig` 传的是可变闭包 —— 界面改配置（PUT /api/config）后立刻生效，无需重启。
+ */
+function buildUiRunner(getConfig, defaultIndex, logger) {
+  return createWebRunner({
+    getConfig,
+    logger,
+    defaultInstance: defaultIndex,
+
+    instanceFactory: (index) => ensureInstanceReady(getConfig(), index, logger),
+
+    controllerFactory: async (cfg, inst) => createController(cfg, inst, logger),
+
+    resourceFactory: (cfg) => createResource(cfg, logger),
+
+    taskerFactory: (controller, resource) => createTasker(controller, resource, logger),
+
+    runTasks: (tasker, controller, entries, cfg, lg, override, opts) =>
+      runTasks(tasker, controller, entries, cfg, lg, override, opts),
+
+    pipelineOverride: (cfg) => buildPipelineOverride(cfg),
+
+    screencap: (controller) => screencap(controller).then((r) => r.data),
+
+    tapImpl: async (controller, x, y) => {
+      await controller.post_click(x, y).wait();
+      return true;
+    },
+
+    swipeImpl: async (controller, from, to, durationMs) => {
+      await controller.post_swipe(from[0], from[1], to[0], to[1], durationMs).wait();
+      return true;
+    },
+
+    /**
+     * 单节点试跑：用一个临时 tasker 跑一个节点，用于「界面上点一下就想试这个节点」。
+     * 结果通过事件层登记，界面能直接看到成败与最后节点。
+     */
+    runNodeImpl: async (index, node, timeoutMs) => {
+      const cfg = getConfig();
+      const inst = pickInstances(cfg, index)[0];
+      const { controller } = await createController(cfg, inst, logger);
+      const { resource } = await createResource(cfg, logger);
+      const tasker = createTasker(controller, resource, logger);
+      const { ok, results } = await runTasks(
+        tasker,
+        controller,
+        [node],
+        { ...cfg, runtime: { ...cfg.runtime, taskTimeoutMs: timeoutMs } },
+        logger,
+        buildPipelineOverride(cfg),
+        {},
+      );
+      return { ok, results, entry: node };
+    },
+  });
+}
+
 async function cmdUi(config, args, logger) {
   const port = Number(args.port ?? 8848);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -558,58 +621,19 @@ async function cmdUi(config, args, logger) {
   const host = args['allow-remote'] === true ? '0.0.0.0' : '127.0.0.1';
   const defaultIndex = parseInstanceArg(args) ?? config.instances[0]?.index ?? 0;
 
-  /** 当前正在运行的上下文，供 /api/stop 用。 */
-  let current = null;
-
-  const runner = {
-    getRunState: () => ({ ...events.state }),
-
-    async start(opts = {}) {
-      if (events.state.running) throw new Error('已有任务在运行中');
-      const index = opts.instance ?? defaultIndex;
-      const inst = pickInstances(config, index)[0];
-
-      logger.info(
-        `网页请求执行：实例 ${index}，任务 ${opts.tasks?.length ? opts.tasks.join(', ') : '(自动发现)'}`,
-      );
-
-      await ensureInstanceReady(config, index, logger);
-      const { controller } = await createController(config, inst, logger);
-      const { resource, nodes } = await createResource(config, logger);
-      const tasker = createTasker(controller, resource, logger);
-      current = { tasker, controller };
-
-      const { entries } = decideEntries(
-        config,
-        inst,
-        { tasks: opts.tasks?.length ? opts.tasks.join(',') : undefined },
-        nodes,
-        logger,
-      );
-      const resolved = entries.map((e) => resolveEntry(e, nodes, logger));
-
-      // 告诉网页层：准备阶段结束，真正开始跑节点了
-      opts.onReady?.();
-
-      try {
-        return await runTasks(
-          tasker,
-          controller,
-          resolved,
-          config,
-          logger,
-          buildPipelineOverride(config),
-          { retry: opts.retry ?? 0 },
-        );
-      } finally {
-        current = null;
-      }
-    },
-
-    async stop() {
-      if (current?.tasker) current.tasker.post_stop().wait();
-    },
+  // 可变配置：界面改配置后立刻生效（详见 buildUiRunner 的注释）
+  let currentConfig = config;
+  const getConfig = () => currentConfig;
+  const setConfig = (next) => {
+    currentConfig = next;
   };
+
+  logger.info(
+    `界面可用参数：${Object.keys(args).filter((k) => k !== '_').join(', ') || '（默认）'}`,
+  );
+
+  const runner = buildUiRunner(getConfig, defaultIndex, logger);
+  runner.installCleanup();
 
   const server = await startWebServer({
     config,

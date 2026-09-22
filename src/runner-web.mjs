@@ -192,6 +192,10 @@ export function createWebRunner(options = {}) {
     const tasker = await ensureTasker(controller, resource);
     runCtx = { tasker, controller, index };
 
+    // 设备与资源都就绪了：通知调用方把阶段从 starting 切到 running。
+    // 没有这个回调，界面会在整个运行期间显示「正在准备」（早先踩过）。
+    meta.onReady?.();
+
     logger.info(
       `开始执行：实例 ${index}，${plan.entries.length} 个任务` +
         (meta.presetName ? `（任务集「${meta.presetName}」）` : ''),
@@ -270,7 +274,7 @@ export function createWebRunner(options = {}) {
           instance: index,
         });
         try {
-          const result = await execute(plan, meta);
+          const result = await execute(plan, { ...meta, onReady: opts.onReady });
           const failed = !result?.ok;
           events.finishRun(failed ? 'failed' : 'ok');
           return result;

@@ -10,9 +10,10 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { PATHS, resolveInstance } from './config.mjs';
+import { PATHS, resolveInstance, pickInstances, sanitizeRuntimeOverrides } from './config.mjs';
 import * as events from './events.mjs';
-import { discoverModules } from './resource.mjs';
+import { discoverModules, resolveEntry, validatePipelines } from './resource.mjs';
+import { decideEntries } from './cli-args.mjs';
 
 /**
  * @typedef {object} WebRunner
@@ -88,12 +89,14 @@ export function listArtifacts() {
 }
 
 /** 状态快照（给 /api/state 与 SSE 的首帧用）。 */
-export function buildState(config, appVersion, phase = 'idle') {
+export function buildState(config, appVersion, phase = null) {
+  const currentPhase = phase ?? events.ext.phase;
   return {
     app: { version: appVersion },
     config: {
       package: config.game?.package ?? null,
       shortSide: config.runtime?.shortSide ?? null,
+      runtime: { ...(config.runtime ?? {}) },
       instances: (config.instances ?? []).map((i) => ({
         index: i.index,
         enabled: i.enabled !== false,
@@ -102,40 +105,85 @@ export function buildState(config, appVersion, phase = 'idle') {
       })),
     },
     modules: discoverModules(),
+    device: events.ext.device,
+    schedule: events.ext.schedule,
+    runs: events.getRuns(20),
+    // phase 覆盖 events.state.running：连设备、建控制器要好几秒，
+    // 这段时间 events.state.running 还是 false，只看它会让第二次点击
+    // 又启动一轮（实测两个 run 抢同一个模拟器）。
     run: {
-      ...events.state,
-      // phase 覆盖 events.state.running：连设备、建控制器要好几秒，
-      // 这段时间 events.state.running 还是 false，只看它会让第二次点击
-      // 又启动一轮（实测两个 run 抢同一个模拟器）。
-      running: phase !== 'idle' || events.state.running,
-      phase,
+      ...events.buildRunState(),
+      running: currentPhase !== 'idle' || events.state.running,
+      phase: currentPhase,
     },
   };
+}
+
+/**
+ * 把前端传来的执行请求解析成「真实节点名 + 单步超时」。
+ *
+ * 支持三种入参（优先级从高到低）：
+ *   1. `steps: [{entry, enabled, timeoutMs}]` —— 界面编排用的形态，顺序即执行顺序
+ *   2. `tasks: string[]` —— CLI 风格，元素可以是节点名或流水线文件名
+ *   3. 都不给 —— 走 config.instances[].tasks，再退回自动发现
+ *
+ * 解析逻辑复用 cli-args 的 decideEntries，保证界面与 CLI 的优先级完全一致。
+ */
+export function resolveRunPlan(config, body, logger) {
+  const index = Number.isInteger(body.instance) ? body.instance : (config.instances[0]?.index ?? 0);
+  const inst = pickInstances(config, index)[0];
+  const nodes = listPipelineNodes();
+
+  // 形态 1：显式 steps
+  if (Array.isArray(body.steps) && body.steps.length > 0) {
+    const entries = [];
+    const stepTimeouts = {};
+    for (const s of body.steps) {
+      if (!s || typeof s.entry !== 'string' || !s.entry) continue;
+      if (s.enabled === false) continue;
+      const entry = resolveEntry(s.entry, nodes, logger);
+      entries.push(entry);
+      if (Number.isInteger(s.timeoutMs) && s.timeoutMs > 0) stepTimeouts[entry] = s.timeoutMs;
+    }
+    return { entries, stepTimeouts, source: 'steps（界面编排）' };
+  }
+
+  // 形态 2/3：tasks，或配置里的 tasks，或自动发现
+  const tasks =
+    Array.isArray(body.tasks) && body.tasks.length > 0 ? body.tasks.join(',') : undefined;
+  const { entries, source } = decideEntries(config, inst, { tasks }, nodes, logger);
+  return { entries: entries.map((e) => resolveEntry(e, nodes, logger)), stepTimeouts: {}, source };
+}
+
+/** 资源里真实存在的节点名（用于校验与解析入口）。读不到就返回空数组。 */
+function listPipelineNodes() {
+  const nodes = [];
+  for (const p of validatePipelines()) {
+    if (p.ok) nodes.push(...p.nodes);
+  }
+  return nodes;
 }
 
 // ---------------------------------------------------------------- 路由
 
 async function handle(req, res, ctx) {
-  const { config, logger, runner, appVersion, ctl } = ctx;
+  const { config, logger, runner, appVersion } = ctx;
   const url = new URL(req.url, 'http://localhost');
   const route = url.pathname;
 
-  /** 切换运行阶段，并立刻通过 SSE 广播，页面不用等轮询。 */
-  const setPhase = (phase) => {
-    ctl.phase = phase;
-    events.bus.emit('state', {
-      ...events.state,
-      running: phase !== 'idle' || events.state.running,
-      phase,
-    });
-  };
+  /**
+   * 切换运行阶段，并立刻通过 SSE 广播，页面不用等轮询。
+   * 阶段状态单一来源是 events.ext.phase —— 早先另有一份 ctl.phase，
+   * 两份状态会漂移（runner 已经忙了，网页还以为空闲）。
+   */
+  const setPhase = (phase) => events.setPhase(phase);
 
   if (req.method === 'GET' && route === '/') {
     return sendText(res, 200, renderPage(), 'text/html; charset=utf-8');
   }
 
   if (req.method === 'GET' && route === '/api/state') {
-    return sendJson(res, 200, buildState(config, appVersion, ctl.phase));
+    return sendJson(res, 200, buildState(config, appVersion));
   }
 
   if (req.method === 'GET' && route === '/api/artifacts') {
@@ -168,7 +216,7 @@ async function handle(req, res, ctx) {
     };
 
     // 先补发历史，新连上的页面不会空白
-    send('snapshot', buildState(config, appVersion, ctl.phase));
+    send('snapshot', buildState(config, appVersion));
     for (const l of events.getLogHistory()) send('log', l);
     for (const n of events.getNodeHistory()) send('node', n);
 
@@ -197,9 +245,11 @@ async function handle(req, res, ctx) {
   }
 
   if (req.method === 'POST' && route === '/api/run') {
-    // 必须用 ctl.phase 而不是 events.state.running：后者要等 runTasks 才开始置位
-    if (ctl.phase !== 'idle') {
-      return sendJson(res, 409, { error: `已有任务在${ctl.phase === 'stopping' ? '停止中' : '运行中'}，请稍候` });
+    // 必须用 events.ext.phase 而不是 events.state.running：后者要等 startRun 才开始置位
+    if (events.ext.phase !== 'idle') {
+      return sendJson(res, 409, {
+        error: `已有任务在${events.ext.phase === 'stopping' ? '停止中' : '运行中'}，请稍候`,
+      });
     }
     let body;
     try {
@@ -207,20 +257,46 @@ async function handle(req, res, ctx) {
     } catch (e) {
       return sendJson(res, 400, { error: e.message });
     }
+
+    const instance = Number.isInteger(body.instance) ? body.instance : undefined;
+    const retry = Number.isInteger(body.retry) ? body.retry : 0;
+
+    // 把「用户点选的东西」解析成真实节点名：顺序即执行顺序。
+    // 兼容两种入参：显式 steps（带开关/单步超时）与 CLI 风格的 tasks 列表。
+    let plan;
+    try {
+      plan = resolveRunPlan(config, body, logger);
+    } catch (e) {
+      return sendJson(res, 400, { error: e.message });
+    }
+    if (plan.entries.length === 0) {
+      return sendJson(res, 400, {
+        error: '没有要执行的任务：勾选的步骤全部关闭，且没有可自动发现的模块',
+      });
+    }
+
     const opts = {
-      tasks: Array.isArray(body.tasks) ? body.tasks : undefined,
-      instance: Number.isInteger(body.instance) ? body.instance : undefined,
-      retry: Number.isInteger(body.retry) ? body.retry : 0,
+      entries: plan.entries,
+      stepTimeouts: plan.stepTimeouts,
+      instance,
+      retry,
+      runtime: sanitizeRuntimeOverrides(body.runtime).clean,
+      preset: typeof body.preset === 'string' ? body.preset : undefined,
+      presetName: typeof body.presetName === 'string' ? body.presetName : undefined,
+      source: plan.source,
     };
 
-    // 先占位再回包，避免「解析完请求到 runTasks 置位」之间被第二个请求插进来
+    // 先占位再回包，避免「解析完请求到真正开始跑」之间被第二个请求插进来
     setPhase('starting');
-    sendJson(res, 202, { started: true, options: opts });
+    sendJson(res, 202, { started: true, options: { ...opts, entries: opts.entries.slice() } });
 
     try {
-      // onReady 由 runner 在「设备就绪、资源已加载、即将开跑」时调用；
-      // 没有它 phase 会一直停在 starting，界面整个运行期间都显示「正在准备」。
-      await runner.start({ ...opts, onReady: () => setPhase('running') });
+      // onReady 由执行层在「设备就绪、资源已加载、即将开跑」时回调，
+      // 用来把阶段从 starting 切到 running
+      const result = await runner.start({ ...opts, onReady: () => setPhase('running') });
+      if (result && result.ok === false) {
+        logger.warn('本次执行有失败的任务，详情见上方汇总');
+      }
     } catch (e) {
       logger.error(`网页触发的执行失败：${e.message}`);
       logger.debug(e.stack ?? '');
@@ -237,10 +313,10 @@ async function handle(req, res, ctx) {
   }
 
   if (req.method === 'POST' && route === '/api/stop') {
-    if (ctl.phase === 'idle') {
+    if (events.ext.phase === 'idle') {
       return sendJson(res, 409, { error: '当前没有任务在运行' });
     }
-    if (ctl.phase === 'stopping') {
+    if (events.ext.phase === 'stopping') {
       return sendJson(res, 409, { error: '正在停止中' });
     }
     setPhase('stopping');
@@ -267,7 +343,7 @@ async function handle(req, res, ctx) {
 export async function startWebServer({ config, logger, runner, port = 8848, host = '127.0.0.1', appVersion = '0.0.0' }) {
   if (!runner) throw new Error('startWebServer 需要 runner');
 
-  const ctx = { config, logger, runner, appVersion, ctl: { phase: 'idle' } };
+  const ctx = { config, logger, runner, appVersion };
   const server = http.createServer((req, res) => {
     handle(req, res, ctx).catch((e) => {
       logger?.error(`网页请求出错：${e.message}`);
