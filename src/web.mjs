@@ -14,6 +14,7 @@ import { PATHS, resolveInstance, pickInstances, sanitizeRuntimeOverrides } from 
 import * as events from './events.mjs';
 import { discoverModules, resolveEntry, validatePipelines } from './resource.mjs';
 import { decideEntries } from './cli-args.mjs';
+import { listInstances, ensureInstanceReady } from './device.mjs';
 
 /**
  * @typedef {object} WebRunner
@@ -164,12 +165,86 @@ function listPipelineNodes() {
   return nodes;
 }
 
+// ---------------------------------------------------------------- 写操作守卫
+
+const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+/**
+ * 写操作的来源校验（防 DNS rebinding）。
+ *
+ * 背景：服务默认只监听 127.0.0.1，但攻击者可以把自己的域名解析到 127.0.0.1，
+ * 让受害者的浏览器**从外部页面**直接对本服务发写请求。浏览器会带上
+ * `Origin`，据此判断是不是同源即可拦掉。
+ *
+ * 放行规则（宁松勿误伤，因为我们本来也没有鉴权）：
+ *   - 非写操作（GET 等）不校验
+ *   - 没有 Origin（curl、脚本等非浏览器客户端）放行
+ *   - 已知的**本机与非浏览器来源**放行：`null`、`file://` 场景
+ *   - Origin 的主机名是本机回环地址（127.0.0.1 / localhost / ::1）放行
+ *   - 其余一律 403
+ *
+ * @returns {string|null} 不通过时返回给用户的错误说明
+ */
+export function checkOrigin(req, { host = '127.0.0.1' } = {}) {
+  if (!WRITE_METHODS.has(req.method ?? 'GET')) return null;
+  const origin = req.headers?.origin;
+  if (!origin || origin === 'null') return null;
+
+  let originHost;
+  try {
+    originHost = new URL(origin).hostname;
+  } catch {
+    return `请求来源无法识别：${origin}`;
+  }
+
+  const localNames = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+  if (localNames.has(originHost)) return null;
+  // 监听在 0.0.0.0 时允许本机的局域网地址访问（使用者自己开的开关）
+  if (host === '0.0.0.0' && /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(originHost)) {
+    return null;
+  }
+
+  return `拒绝跨站写请求：来源 ${origin}。界面请通过 http://127.0.0.1 访问`;
+}
+
+/**
+ * 简易令牌校验（仅在 --allow-remote 时启用）。
+ *
+ * HTTP 头名**不区分大小写**，所以这里必须自己按小写查找；
+ * 直接写 `req.headers['X-Token']` 只在 Node 规范化过请求头时才碰巧能用，
+ * 一旦用别的客户端或直接调用本函数就会漏判。
+ */
+export function checkToken(req, token) {
+  if (!token) return null;
+  const headers = req.headers ?? {};
+  let got;
+  for (const [name, value] of Object.entries(headers)) {
+    if (name.toLowerCase() === 'x-token') {
+      got = value;
+      break;
+    }
+  }
+  if (got === token) return null;
+  return '缺少或错误的 X-Token（本服务以 --allow-remote 启动，需要令牌）';
+}
+
 // ---------------------------------------------------------------- 路由
 
 async function handle(req, res, ctx) {
-  const { config, logger, runner, appVersion } = ctx;
+  const { config, logger, runner, appVersion, host, token } = ctx;
   const url = new URL(req.url, 'http://localhost');
   const route = url.pathname;
+
+  // 只对写操作做来源校验与令牌校验：
+  //   - 来源校验防 DNS rebinding（浏览器自动带 Origin）
+  //   - 令牌用于 --allow-remote 时保护写操作；GET（例如实时画面每秒轮询截图）
+  //     不校验令牌，否则界面每帧都得带令牌，既难用也没必要
+  if (WRITE_METHODS.has(req.method ?? 'GET')) {
+    const originErr = checkOrigin(req, { host });
+    if (originErr) return sendJson(res, 403, { error: originErr });
+    const tokenErr = checkToken(req, token);
+    if (tokenErr) return sendJson(res, 401, { error: tokenErr });
+  }
 
   /**
    * 切换运行阶段，并立刻通过 SSE 广播，页面不用等轮询。
@@ -331,7 +406,170 @@ async function handle(req, res, ctx) {
     }
   }
 
+  // ------------------------------------------------------------ 实时画面
+
+  if (req.method === 'GET' && route === '/api/live/shot') {
+    if (!runner.shot) return sendJson(res, 501, { error: '执行层未提供截图能力' });
+    try {
+      // 执行层的截图返回 `{data, size}`；data 已由 controller.screencap 归一成 Buffer
+      const shot = await runner.shot({ instance: instanceOf(url) });
+      const raw = Buffer.isBuffer(shot) ? shot : shot?.data;
+      if (!raw) throw new Error('截图返回空数据');
+      const data = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+      if (data.length === 0) throw new Error('截图数据长度为 0');
+      res.writeHead(200, {
+        'content-type': 'image/png',
+        'content-length': data.length,
+        'cache-control': 'no-store, no-cache, must-revalidate',
+        'x-image-width': String(shot?.size?.width ?? ''),
+        'x-image-height': String(shot?.size?.height ?? ''),
+      });
+      return res.end(data);
+    } catch (e) {
+      // 拿不到画面不是服务端错误：多半是模拟器没开或正忙
+      return sendJson(res, 503, { error: e.message });
+    }
+  }
+
+  if (req.method === 'POST' && route === '/api/live/start') {
+    if (!runner.startLive) return sendJson(res, 501, { error: '执行层未提供实时画面能力' });
+    let body = {};
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      return sendJson(res, 400, { error: e.message });
+    }
+    try {
+      await runner.startLive({ instance: instanceOf(url, body) });
+      return sendJson(res, 200, { live: true, device: events.ext.device });
+    } catch (e) {
+      return sendJson(res, 409, { error: e.message });
+    }
+  }
+
+  if (req.method === 'POST' && route === '/api/live/stop') {
+    if (!runner.stopLive) return sendJson(res, 501, { error: '执行层未提供实时画面能力' });
+    await runner.stopLive();
+    return sendJson(res, 200, { live: false });
+  }
+
+  // ------------------------------------------------------------ 手动操作
+
+  if (req.method === 'POST' && route === '/api/input/tap') {
+    if (!runner.tap) return sendJson(res, 501, { error: '执行层未提供输入能力' });
+    let body;
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      return sendJson(res, 400, { error: e.message });
+    }
+    if (!Number.isFinite(body.x) || !Number.isFinite(body.y)) {
+      return sendJson(res, 400, { error: '需要数字类型的 x 与 y' });
+    }
+    if (body.x < 0 || body.y < 0) {
+      return sendJson(res, 400, { error: '坐标不能为负' });
+    }
+    try {
+      await runner.tap(body.x, body.y, { instance: instanceOf(url, body) });
+      return sendJson(res, 200, { tapped: [Math.round(body.x), Math.round(body.y)] });
+    } catch (e) {
+      // 任务运行期间会被执行层拒绝（409）；设备问题也给 409，语义是「现在不行」
+      return sendJson(res, 409, { error: e.message });
+    }
+  }
+
+  if (req.method === 'POST' && route === '/api/input/swipe') {
+    if (!runner.swipe) return sendJson(res, 501, { error: '执行层未提供输入能力' });
+    let body;
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      return sendJson(res, 400, { error: e.message });
+    }
+    const from = body.from;
+    const to = body.to;
+    if (
+      !Array.isArray(from) ||
+      !Array.isArray(to) ||
+      from.length < 2 ||
+      to.length < 2 ||
+      ![...from, ...to].every((n) => Number.isFinite(n))
+    ) {
+      return sendJson(res, 400, { error: 'from / to 需要是两个数字的数组，例如 [x,y]' });
+    }
+    const durationMs = Number.isFinite(body.durationMs) ? Math.max(50, body.durationMs) : 300;
+    try {
+      await runner.swipe(from, to, durationMs, { instance: instanceOf(url, body) });
+      return sendJson(res, 200, { swiped: { from, to, durationMs } });
+    } catch (e) {
+      return sendJson(res, 409, { error: e.message });
+    }
+  }
+
+  // ------------------------------------------------------------ 设备
+
+  if (req.method === 'GET' && route === '/api/device') {
+    let instances = [];
+    let error = null;
+    try {
+      instances = (await listInstances(config, logger)).map((i) => ({
+        index: i.index,
+        name: i.name,
+        isMain: i.isMain,
+        isAndroidStarted: i.isAndroidStarted,
+        address: resolveInstance(config, i.index).address,
+        adbPort: i.adbPort,
+      }));
+    } catch (e) {
+      error = e.message;
+    }
+    return sendJson(res, 200, { instances, current: events.ext.device, error });
+  }
+
+  if (req.method === 'POST' && route === '/api/device/launch') {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      return sendJson(res, 400, { error: e.message });
+    }
+    const index = Number.isInteger(body.index) ? body.index : 0;
+    if (events.ext.phase !== 'idle') {
+      return sendJson(res, 409, { error: '任务运行期间不能拉起实例' });
+    }
+    // 拉起实例会调 MuMuManager 并等待 Android 起来，可能要几十秒 —— 先回 202
+    sendJson(res, 202, { launching: index });
+    try {
+      const ready = await ensureInstanceReady(config, index, logger);
+      events.publishDevice({
+        ...(events.ext.device ?? {}),
+        index,
+        ready: true,
+        address: ready.address,
+        detail: '实例已就绪',
+      });
+    } catch (e) {
+      logger.error(`拉起实例 ${index} 失败：${e.message}`);
+      events.publishLog({
+        ts: new Date().toISOString(),
+        level: 'error',
+        scope: 'device',
+        message: `拉起实例 ${index} 失败：${e.message}`,
+      });
+    }
+    return undefined;
+  }
+
   return sendJson(res, 404, { error: `未知路由 ${req.method} ${route}` });
+}
+
+/** 从查询串或请求体里取实例索引。 */
+function instanceOf(url, body = {}) {
+  if (Number.isInteger(body.instance)) return body.instance;
+  const raw = url.searchParams.get('instance');
+  if (raw === null || raw === '') return undefined;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 ? n : undefined;
 }
 
 // ---------------------------------------------------------------- 服务
@@ -340,10 +578,18 @@ async function handle(req, res, ctx) {
  * 启动网页服务。
  * @returns {Promise<{url: string, port: number, host: string, close: () => Promise<void>}>}
  */
-export async function startWebServer({ config, logger, runner, port = 8848, host = '127.0.0.1', appVersion = '0.0.0' }) {
+export async function startWebServer({
+  config,
+  logger,
+  runner,
+  port = 8848,
+  host = '127.0.0.1',
+  appVersion = '0.0.0',
+  token = null,
+}) {
   if (!runner) throw new Error('startWebServer 需要 runner');
 
-  const ctx = { config, logger, runner, appVersion };
+  const ctx = { config, logger, runner, appVersion, host, token };
   const server = http.createServer((req, res) => {
     handle(req, res, ctx).catch((e) => {
       logger?.error(`网页请求出错：${e.message}`);

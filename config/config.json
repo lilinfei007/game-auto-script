@@ -1,8 +1,8 @@
 {
   "mumu": {
-    "path": "D:/MuMu",
-    "manager": "D:/MuMu/nx_main/MuMuManager.exe",
-    "adb": "D:/MuMu/nx_main/adb.exe",
+    "path": "D:/Program Files/Netease/MuMu",
+    "manager": "D:/Program Files/Netease/MuMu/nx_main/MuMuManager.exe",
+    "adb": "D:/Program Files/Netease/MuMu/nx_main/adb.exe",
     "basePort": 16384,
     "portStep": 32
   },

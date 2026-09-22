@@ -6,38 +6,121 @@
  * `controller screencap failed`。根因是**没有任何实例存活前置检查**。
  * 本模块用官方 MuMuManager CLI 在动手前把实例拉到「Android 已启动 + adb 已连」。
  *
- * MuMuManager 用法（已实测）：
- *   MuMuManager.exe info --vmindex all          # 输出实例 JSON（index 为字符串）
+ * MuMuManager 用法（已实测，v12 NX）：
+ *   MuMuManager.exe info --vmindex all          # 输出**以实例号为键的对象**
+ *   MuMuManager.exe info -v <i>                 # 输出单个实例对象
  *   MuMuManager.exe control -v <i> launch       # 启动实例
  *   MuMuManager.exe adb -v <i> -c connect       # 为该实例建立 adb 连接
+ *
+ * ⚠️ 两个踩过的坑：
+ *   1. `info --vmindex all` 的返回是 `{"0": {...}, "1": {...}}`（键是字符串索引），
+ *      **不是数组**。早先只处理「数组」与「本身就是实例的对象」，
+ *      于是真实输出被解析成 3 个没有 index 字段的对象、全部被丢掉，
+ *      `doctor` 直接报「读取不到任何实例」。
+ *   2. 字段名有下划线版（`is_android_started`）与驼峰版（`isAndroidStarted`）两种，
+ *      不同 MuMu 版本/子命令不一致，两种都要认。
  */
 import { run, extractJsonValues } from './util/exec.mjs';
 
-/** 读取全部实例信息，返回规范化后的数组。 */
+/** 取第一个「不是 undefined/null」的值。 */
+function pick(...values) {
+  for (const v of values) {
+    if (v !== undefined && v !== null) return v;
+  }
+  return undefined;
+}
+
+/** 宽松布尔：兼容 true / "true" / 1 / "1"。 */
+function toBool(v) {
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'number') return v !== 0;
+  if (typeof v === 'string') return v === 'true' || v === '1';
+  return false;
+}
+
+/**
+ * 把一个原始 item 规范化成实例对象；没有可用索引时返回 null。
+ *
+ * @param {object} item MuMuManager 返回的单个实例
+ * @param {string} [key] 该 item 在「以索引为键的对象」里的键
+ */
+export function normalizeInstance(item, key) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+
+  // 索引来源优先级：item.index（字符串或数字）> 键名 > adb_port 反推
+  const rawIndex = pick(item.index, item.vmindex, item.vm_index, key);
+  let index = rawIndex !== undefined && rawIndex !== '' ? Number(rawIndex) : NaN;
+  if (!Number.isInteger(index) || index < 0) return null;
+
+  const rawPort = pick(item.adb_port, item.adbPort);
+  const adbPort = rawPort !== undefined && rawPort !== '' ? Number(rawPort) : undefined;
+
+  return {
+    index,
+    name: pick(item.name, item.vm_name, item.vmName) ?? `实例 ${index}`,
+    isMain: toBool(pick(item.is_main, item.isMain)),
+    isAndroidStarted: toBool(pick(item.is_android_started, item.isAndroidStarted)),
+    isProcessStarted: toBool(pick(item.is_process_started, item.isProcessStarted)),
+    adbPort: Number.isFinite(adbPort) ? adbPort : undefined,
+    hypervEnabled: toBool(pick(item.hyperv_enabled, item.hypervEnabled)),
+    raw: item,
+  };
+}
+
+/**
+ * 把 `extractJsonValues` 抽出的任意一段 JSON 摊平成实例数组。
+ * 覆盖三种真实形态：
+ *   - `[{...}, {...}]`              数组
+ *   - `{"0": {...}, "1": {...}}`    以索引为键的对象（`--vmindex all` 的形态）
+ *   - `{index: 0, ...}`             单个实例对象
+ */
+export function flattenInstances(value) {
+  if (value === null || value === undefined) return [];
+
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeInstance(item)).filter(Boolean);
+  }
+  if (typeof value !== 'object') return [];
+
+  const direct = normalizeInstance(value);
+  if (direct) return [direct];
+
+  // 以索引为键的对象：值都是对象，键是索引
+  const out = [];
+  for (const [key, item] of Object.entries(value)) {
+    const normalized = normalizeInstance(item, key);
+    if (normalized) out.push(normalized);
+  }
+  return out;
+}
+
+/** 按索引去重（同一实例可能被多段输出重复描述），保留字段更全的那条。 */
+function dedupe(instances) {
+  const byIndex = new Map();
+  for (const inst of instances) {
+    const prev = byIndex.get(inst.index);
+    if (!prev) {
+      byIndex.set(inst.index, inst);
+      continue;
+    }
+    byIndex.set(inst.index, {
+      ...prev,
+      ...inst,
+      // adbPort 只在有值时才覆盖，避免后一条的空值把前面的好值抹掉
+      adbPort: inst.adbPort ?? prev.adbPort,
+      name: inst.name || prev.name,
+    });
+  }
+  return [...byIndex.values()].sort((a, b) => a.index - b.index);
+}
+
+/** 读取全部实例信息，返回规范化并按索引排序的数组。 */
 export async function listInstances(config, logger) {
   const { manager } = config.mumu;
   const res = await run(manager, ['info', '--vmindex', 'all'], { timeoutMs: 20000 });
 
   const text = `${res.stdout}\n${res.stderr}`;
-  const values = extractJsonValues(text);
-
-  const instances = [];
-  for (const v of values) {
-    const list = Array.isArray(v) ? v : [v];
-    for (const item of list) {
-      if (!item || typeof item !== 'object' || item.index === undefined) continue;
-      instances.push({
-        index: Number(item.index),
-        name: item.name,
-        isMain: item.is_main === true,
-        isAndroidStarted: item.is_android_started === true,
-        isProcessStarted: item.is_process_started === true,
-        adbPort: item.adb_port !== undefined ? Number(item.adb_port) : undefined,
-        hypervEnabled: item.hyperv_enabled === true,
-        raw: item,
-      });
-    }
-  }
+  const instances = dedupe(extractJsonValues(text).flatMap(flattenInstances));
 
   if (instances.length === 0) {
     logger?.warn(`未能从 MuMuManager 解析出实例信息；stdout=${text.slice(0, 300)}`);
@@ -59,44 +142,39 @@ export async function launchInstance(config, index, logger) {
   if (!res.ok) {
     logger?.warn(`launch 返回非零：code=${res.code} ${res.stderr.trim() || res.stdout.trim()}`);
   }
-  return res.ok;
+  return res;
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-/** 轮询直到 Android 启动完成。 */
+/** 等待 Android 起来（轮询 MuMuManager 的实例状态）。 */
 export async function waitForAndroid(config, index, logger, timeoutMs) {
-  const limit = timeoutMs ?? config.runtime.launchTimeoutMs;
+  const limit = timeoutMs ?? config.runtime?.launchTimeoutMs ?? 90000;
   const deadline = Date.now() + limit;
-  let last = null;
+  logger?.info(`等待实例 ${index} 的 Android 启动（上限 ${Math.round(limit / 1000)}s）...`);
 
   while (Date.now() < deadline) {
-    const inst = await getInstance(config, index, null);
-    last = inst;
+    const inst = await getInstance(config, index, logger);
     if (inst?.isAndroidStarted) {
-      logger?.info(`实例 ${index} Android 已启动（adb_port=${inst.adbPort ?? '未知'}）`);
+      logger?.info(`实例 ${index} Android 已启动`);
       return inst;
     }
-    await sleep(2000);
+    await new Promise((r) => setTimeout(r, 2000));
   }
 
-  throw new Error(
-    `实例 ${index} 在 ${Math.round(limit / 1000)}s 内未完成启动` +
-      (last ? `（is_process_started=${last.isProcessStarted}, is_android_started=${last.isAndroidStarted}）` : '（读取不到实例信息）'),
-  );
+  throw new Error(`实例 ${index} 在 ${Math.round(limit / 1000)}s 内仍未启动 Android`);
 }
 
-/** 为指定实例建立 adb 连接。 */
+/**
+ * 让 adb 连上实例。
+ *
+ * 注意：MuMu 自己会注册一个 `emulator-5554`（可能处于 offline），
+ * 本项目的控制器明确用 `127.0.0.1:<port>`，因此这里以 IP 形式连接为准。
+ */
 export async function adbConnect(config, index, logger) {
   const res = await run(config.mumu.manager, ['adb', '-v', String(index), '-c', 'connect'], {
     timeoutMs: 30000,
   });
-  const text = `${res.stdout}${res.stderr}`.trim();
-  if (/cannot connect|failed|拒绝/i.test(text)) {
-    logger?.warn(`adb connect 输出异常：${text}`);
-    return false;
-  }
-  return true;
+  logger?.debug(`MuMuManager adb connect: ${(res.stdout || res.stderr || '').trim().slice(0, 200)}`);
+  return res;
 }
 
 /** 用 adb 直接验证设备可响应（比 adb devices 列表更可靠）。 */
@@ -146,7 +224,7 @@ export async function ensureInstanceReady(config, index, logger) {
         alive = true;
         break;
       }
-      await sleep(1500);
+      await new Promise((r) => setTimeout(r, 1500));
     }
     if (!alive) {
       throw new Error(

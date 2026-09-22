@@ -128,11 +128,22 @@ export async function createController(config, instanceConfig, logger) {
   return { controller, address: ready.address, screencap, input, deviceName: match?.[0] };
 }
 
-/** 截图一次并返回 {data, size}。 */
+/**
+ * 截图一次并返回 `{data, size}`。
+ *
+ * ⚠️ maa 的 `job.get()` 返回的是 **ArrayBuffer**，不是 Node 的 Buffer
+ * （实测 `byteLength=1285101`、`Buffer.isBuffer()===false`、`.length` 为 undefined）。
+ * 只看 `.length` 会把「拿到图了」误判成「空数据」，所以这里统一归一成 Buffer，
+ * 让所有调用方（落盘、HTTP 响应、尺寸解析）都能按 Node 惯例用 `.length`。
+ *
+ * @returns {Promise<{data: Buffer, size: {format:string,width:number,height:number}|null}>}
+ */
 export async function screencap(controller) {
   const job = controller.post_screencap().wait();
-  const data = await job.get();
-  if (!data) throw new Error('截图失败：返回空数据');
+  const raw = await job.get();
+  if (!raw) throw new Error('截图失败：返回空数据');
+  const data = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+  if (data.length === 0) throw new Error('截图失败：数据长度为 0');
   return { data, size: readImageSize(data) };
 }
 

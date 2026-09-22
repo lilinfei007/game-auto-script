@@ -6,6 +6,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import maa from '@maaxyz/maa-node';
 
 import {
@@ -577,7 +578,8 @@ function buildUiRunner(getConfig, defaultIndex, logger) {
 
     pipelineOverride: (cfg) => buildPipelineOverride(cfg),
 
-    screencap: (controller) => screencap(controller).then((r) => r.data),
+    // 截图返回 {data, size}：size 让界面能知道真实分辨率（不必自己解析 PNG）
+    screencap: (controller) => screencap(controller),
 
     tapImpl: async (controller, x, y) => {
       await controller.post_click(x, y).wait();
@@ -621,6 +623,23 @@ async function cmdUi(config, args, logger) {
   const host = args['allow-remote'] === true ? '0.0.0.0' : '127.0.0.1';
   const defaultIndex = parseInstanceArg(args) ?? config.instances[0]?.index ?? 0;
 
+  /**
+   * 开放远程访问时自动生成令牌。
+   *
+   * 不这么做的话 `--allow-remote` 就是「把无鉴权的控制接口暴露到局域网」——
+   * 界面上任意一个按钮都能操作你的模拟器。令牌只校验写操作，
+   * GET（实时画面轮询截图）不受影响。
+   */
+  let token = null;
+  if (host !== '127.0.0.1') {
+    token =
+      typeof args.token === 'string' && args.token !== ''
+        ? args.token
+        : crypto.randomBytes(16).toString('hex');
+    logger.warn(`已开放远程访问（监听 ${host}），写操作需要请求头 X-Token: ${token}`);
+    logger.warn('注意：局域网内任何人都能看到实时画面；不需要远程访问就去掉 --allow-remote');
+  }
+
   // 可变配置：界面改配置后立刻生效（详见 buildUiRunner 的注释）
   let currentConfig = config;
   const getConfig = () => currentConfig;
@@ -642,6 +661,7 @@ async function cmdUi(config, args, logger) {
     port,
     host,
     appVersion: appVersion(),
+    token,
   });
   registerCleanup(() => server.close(), '关闭网页服务');
 

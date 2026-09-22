@@ -17,7 +17,7 @@ export const KNOWN_FLAGS = new Set([
   // capture
   'count', 'interval', 'tag', 'out', 'ocr',
   // ui
-  'port', 'host', 'allow-remote', 'open',
+  'port', 'host', 'allow-remote', 'open', 'token',
   // record / replay
   'record', 'no-device',
   // 打包
@@ -55,6 +55,7 @@ export const USAGE = `
   --record FILE     replay 要回放的录制文件（record 生成）
   --port N          ui 监听端口（默认 8848）
   --allow-remote    ui 允许非本机访问（默认只监听 127.0.0.1）
+  --token VALUE     配合 --allow-remote：写操作需要的 X-Token（默认自动生成并打印）
   --open            ui 启动后自动打开浏览器
   --verbose         打开 debug 日志
   -h, --help        显示本帮助
