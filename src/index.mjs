@@ -603,14 +603,13 @@ function buildUiRunner(getConfig, defaultIndex, logger) {
     },
 
     /**
-     * 单节点试跑：用一个临时 tasker 跑一个节点，用于「界面上点一下就想试这个节点」。
-     * 结果通过事件层登记，界面能直接看到成败与最后节点。
+     * 单节点试跑：用执行层**已经取得**的控制器与资源跑一个节点，用于
+     * 「界面上点一下就想试这个节点」。
+     *
+     * 不要在这里自己 createController / createResource：那样每次试跑多花约 10 秒，
+     * 而且那份资源不受 invalidateResource() 管理，会出现「改了流水线但试跑没变化」。
      */
-    runNodeImpl: async (index, node, timeoutMs) => {
-      const cfg = getConfig();
-      const inst = pickInstances(cfg, index)[0];
-      const { controller } = await createController(cfg, inst, logger);
-      const { resource } = await createResource(cfg, logger);
+    runNodeImpl: async ({ controller, resource, node, timeoutMs, cfg }) => {
       const tasker = createTasker(controller, resource, logger);
       const { ok, results } = await runTasks(
         tasker,

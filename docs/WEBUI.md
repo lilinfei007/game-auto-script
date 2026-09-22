@@ -79,11 +79,16 @@
 | GET | `/api/events` | SSE：`snapshot` / `log` / `node` / `task` / `state` / `device` / `schedule` / `run` |
 | POST | `/api/run` | 执行。body：`{steps?, tasks?, instance?, retry?, runtime?}` → `202` |
 | POST | `/api/stop` | 中断当前任务 → `{stopping:true}`；空闲时 `409` |
+| POST | `/api/nodes/run` | 单节点试跑（调试用）。body `{node, instance?, timeoutMs?}` → `202` |
 | GET | `/api/artifacts` | 失败截图 / 识别可视化列表 |
 | GET | `/api/shot?path=` | 取 `debug/` 下的 PNG（有目录穿越防护） |
 
 `/api/run` 的编排语义：`steps` 决定顺序与开关，`tasks` 是 CLI 风格简写，
 两者都不给则走 `instances[].tasks`，再退回自动发现（与 CLI 完全一致）。
+
+`/api/nodes/run` **不算一次完整运行**（不产生运行记录），但同样占用控制器锁，
+并且复用执行层已有的控制器与资源缓存 —— 所以「改完流水线立刻试跑这个节点」
+看到的一定是最新内容（保存流水线时会调 `invalidateResource()` 让缓存失效）。
 
 ### 任务集
 

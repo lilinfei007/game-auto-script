@@ -675,6 +675,117 @@ test('POST /api/schedule/check: 没有调度器时 503', async () => {
   assert.equal(r.status, 503);
 });
 
+// ------------------------------------------------------------ 单节点试跑
+
+test('POST /api/nodes/run: 缺 node 返回 400，任务运行中返回 409', async () => {
+  await waitIdle();
+  const fake = makeDeviceRunner({
+    async runNode(node) {
+      return { ok: true, results: [{ entry: node, ok: true }] };
+    },
+  });
+  const s = await startWebServer({ config, logger: silent, runner: fake, port: 0 });
+  try {
+    const b = s.url.replace(/\/$/, '');
+    const post = (body) =>
+      fetch(b + '/api/nodes/run', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+    assert.equal((await post({})).status, 400, '缺 node');
+    assert.equal((await post({ node: '' })).status, 400, '空 node');
+
+    // 假装有任务在跑：阶段不为 idle 时必须拒绝，别和正在跑的任务抢设备
+    events.setPhase('running');
+    const busy = await post({ node: '回到主界面' });
+    assert.equal(busy.status, 409);
+    assert.match((await busy.json()).error, /已有任务在/);
+    events.setPhase('idle');
+  } finally {
+    await s.close();
+    await waitIdle();
+  }
+});
+
+test('POST /api/nodes/run: 没有能力时 501', async () => {
+  const bare = { getRunState: () => events.buildRunState(), async start() {}, async stop() {} };
+  const s = await startWebServer({ config, logger: silent, runner: bare, port: 0 });
+  try {
+    const r = await fetch(s.url.replace(/\/$/, '') + '/api/nodes/run', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ node: '回到主界面' }),
+    });
+    assert.equal(r.status, 501);
+  } finally {
+    await s.close();
+  }
+});
+
+test('POST /api/nodes/run: 正常试跑返回 202 并调用执行层', async () => {
+  await waitIdle();
+  const calls = [];
+  const fake = makeDeviceRunner({
+    async runNode(node, opts) {
+      calls.push({ node, opts });
+      return { ok: true, results: [{ entry: node, ok: true }] };
+    },
+  });
+  const s = await startWebServer({ config, logger: silent, runner: fake, port: 0 });
+  try {
+    const b = s.url.replace(/\/$/, '');
+    const r = await fetch(b + '/api/nodes/run', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ node: '回到主界面', instance: 2, timeoutMs: 5000 }),
+    });
+    assert.equal(r.status, 202);
+    assert.equal((await r.json()).node, '回到主界面');
+
+    // 202 之后才真正开跑，等一小会儿
+    for (let i = 0; i < 100 && calls.length === 0; i++) await sleep(10);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].node, '回到主界面');
+    assert.deepEqual(calls[0].opts, { instance: 2, timeoutMs: 5000 });
+  } finally {
+    await s.close();
+    await waitIdle();
+  }
+});
+
+test('POST /api/nodes/run: 执行层抛错时不把整个请求搞崩，只记日志', async () => {
+  await waitIdle();
+  const logs = [];
+  const onLog = (e) => logs.push(e);
+  events.bus.on('log', onLog);
+  const fake = makeDeviceRunner({
+    async runNode() {
+      throw new Error('设备掉线');
+    },
+  });
+  const s = await startWebServer({ config, logger: silent, runner: fake, port: 0 });
+  try {
+    const b = s.url.replace(/\/$/, '');
+    const r = await fetch(b + '/api/nodes/run', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ node: '回到主界面' }),
+    });
+    assert.equal(r.status, 202);
+    for (let i = 0; i < 100 && !logs.some((l) => /设备掉线/.test(l.message ?? '')); i++) await sleep(10);
+    assert.ok(
+      logs.some((l) => /设备掉线/.test(l.message ?? '')),
+      `应当把失败原因发布成日志：${JSON.stringify(logs.map((l) => l.message))}`,
+    );
+  } finally {
+    events.bus.off('log', onLog);
+    await s.close();
+    await waitIdle();
+  }
+});
+
 // ------------------------------------------------------------ 任务集写入仍受写守卫保护
 
 test('任务集与流水线的写接口同样受跨站来源与令牌保护', async () => {

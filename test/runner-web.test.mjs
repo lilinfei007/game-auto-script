@@ -45,8 +45,8 @@ function makeEnv(overrides = {}) {
       for (const r of results) events.addResult(r);
       return { ok: true, results };
     },
-    runNodeImpl: async (index, node, timeoutMs) => {
-      log.nodeRuns.push({ index, node, timeoutMs });
+    runNodeImpl: async (ctx) => {
+      log.nodeRuns.push({ index: ctx.index, node: ctx.node, timeoutMs: ctx.timeoutMs, reuses: !!ctx.controller && !!ctx.resource });
       return { ok: true };
     },
     screencap: async () => {
@@ -282,10 +282,24 @@ test('runNode: 校验节点存在，并把单次超时传下去', async () => {
   const { runner, env } = makeRunner();
   const r = await runner.runNode('联盟日常', { timeoutMs: 1234 });
   assert.equal(r.ok, true);
-  assert.deepEqual(env.nodeRuns[0], { index: 0, node: '联盟日常', timeoutMs: 1234 });
+  assert.equal(env.nodeRuns[0].index, 0);
+  assert.equal(env.nodeRuns[0].node, '联盟日常');
+  assert.equal(env.nodeRuns[0].timeoutMs, 1234);
+  assert.equal(env.nodeRuns[0].reuses, true, '应当把已取得的控制器与资源交给实现层，而不是让它自己再建一份');
 
   await assert.rejects(() => runner.runNode('不存在的节点'), /资源里没有节点/);
   await assert.rejects(() => runner.runNode(''), /缺少节点名/);
+});
+
+test('runNode: 复用控制器与资源缓存（不再每次新建）', async () => {
+  const { runner, env } = makeRunner();
+  await runner.runNode('联盟日常');
+  assert.equal(env.controller, 1, '应当建立一次控制器');
+  assert.equal(env.resource, 1, '应当加载一次资源');
+
+  await runner.runNode('启动游戏');
+  assert.equal(env.controller, 1, '第二次试跑不该再建控制器');
+  assert.equal(env.resource, 1, '第二次试跑不该再加载资源');
 });
 
 test('runNode: 未给超时时用配置里的 taskTimeoutMs', async () => {

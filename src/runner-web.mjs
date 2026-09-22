@@ -312,7 +312,7 @@ export function createWebRunner(options = {}) {
       }
       const index = Number.isInteger(opts.instance) ? opts.instance : defaultInstance;
       return serialize('runNode', async () => {
-        await acquireController(index);
+        const { controller } = await acquireController(index);
         const { resource, nodes } = await ensureResource();
         if (!nodes.includes(node)) throw new Error(`资源里没有节点：${node}`);
         const timeoutMs =
@@ -320,7 +320,14 @@ export function createWebRunner(options = {}) {
             ? opts.timeoutMs
             : (cfg().runtime?.taskTimeoutMs ?? 600000);
         logger.info(`单节点试跑：${node}（超时 ${Math.round(timeoutMs / 1000)}s）`);
-        return options.runNodeImpl(index, node, timeoutMs);
+        /**
+         * 把**已经取得**的控制器与资源交给实现层。
+         *
+         * 早先这里只传 index，实现层于是自己又建了一个控制器和一份资源：
+         * 每次试跑多花约 10 秒，而且那份资源不受 `invalidateResource()` 管理 ——
+         * 「改了流水线 → 试跑」看起来不生效，会被误判成保存失败。
+         */
+        return options.runNodeImpl({ controller, resource, nodes, index, node, timeoutMs, cfg: cfg() });
       });
     },
 

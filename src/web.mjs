@@ -594,6 +594,49 @@ async function handle(req, res, ctx) {
     return undefined;
   }
 
+  // ------------------------------------------------------------ 单节点试跑
+
+  if (req.method === 'POST' && route === '/api/nodes/run') {
+    if (!runner.runNode) return sendJson(res, 501, { error: '执行层未提供单节点试跑能力' });
+    if (events.ext.phase !== 'idle') {
+      return sendJson(res, 409, { error: `已有任务在${events.ext.phase === 'stopping' ? '停止中' : '运行中'}，请稍候` });
+    }
+    let body;
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      return sendJson(res, 400, { error: e.message });
+    }
+    if (typeof body.node !== 'string' || !body.node) {
+      return sendJson(res, 400, { error: '需要 node 字段（节点名）' });
+    }
+    // 试跑会连设备、加载资源，可能要十几秒 —— 先回 202 再干活
+    sendJson(res, 202, { started: true, node: body.node });
+    try {
+      const result = await runner.runNode(body.node, {
+        instance: Number.isInteger(body.instance) ? body.instance : undefined,
+        timeoutMs: Number.isInteger(body.timeoutMs) ? body.timeoutMs : undefined,
+      });
+      const ok = result?.ok !== false;
+      logger.info(`单节点试跑「${body.node}」${ok ? '成功' : '失败'}`);
+      events.publishLog({
+        ts: new Date().toISOString(),
+        level: ok ? 'info' : 'error',
+        scope: 'nodes',
+        message: `单节点试跑「${body.node}」${ok ? '成功' : `失败：${result?.results?.[0]?.reason ?? '未知原因'}`}`,
+      });
+    } catch (e) {
+      logger.error(`单节点试跑「${body.node}」失败：${e.message}`);
+      events.publishLog({
+        ts: new Date().toISOString(),
+        level: 'error',
+        scope: 'nodes',
+        message: `单节点试跑「${body.node}」失败：${e.message}`,
+      });
+    }
+    return undefined;
+  }
+
   // ------------------------------------------------------------ 任务集
 
   if (route.startsWith('/api/tasks')) {
