@@ -16,6 +16,7 @@ import {
   readPipelineDoc,
   resolveWritablePipeline,
   writePipelineDoc,
+  formatPipelineJson,
   pipelineStats,
 } from '../src/pipeline-edit.mjs';
 import { PATHS } from '../src/config.mjs';
@@ -441,7 +442,73 @@ test('writePipelineDoc: 写入的内容末尾会补换行', () => {
   fs.writeFileSync(file, '{"A":{"next":[]}}');
   try {
     writePipelineDoc(base, '{"A":{"next":[]}}');
-    assert.equal(fs.readFileSync(file, 'utf8'), '{"A":{"next":[]}}\n');
+    assert.equal(fs.readFileSync(file, 'utf8'), '{\n  "A": {\n    "next": []\n  }\n}\n');
+  } finally {
+    fs.rmSync(file, { force: true });
+  }
+});
+
+// ------------------------------------------------------------ 序列化风格
+
+test('formatPipelineJson: 短数字数组保持一行，对象数组展开', () => {
+  const text = formatPipelineJson({
+    A: {
+      recognition: { type: 'OCR', param: { roi: [595, 1225, 125, 55] } },
+      action: { type: 'Click', param: { target: [1, 2] } },
+      next: ['B', '[JumpBack]C'],
+    },
+  });
+  assert.match(text, /"roi": \[595, 1225, 125, 55\]/, `roi 应当在一行：\n${text}`);
+  assert.match(text, /"target": \[1, 2\]/, `target 应当在一行：\n${text}`);
+  assert.match(text, /"next": \[\n\s+"B",\n\s+"\[JumpBack\]C"\n\s+\]/, `字符串数组应当展开：\n${text}`);
+});
+
+test('formatPipelineJson: 空对象/空数组与嵌套结构', () => {
+  assert.equal(formatPipelineJson({}), '{}');
+  assert.equal(formatPipelineJson([]), '[]');
+  assert.equal(formatPipelineJson({ A: { next: [] } }), '{\n  "A": {\n    "next": []\n  }\n}');
+
+  // 元素是对象的数组应当展开（压成一行会不可读）
+  const nested = formatPipelineJson({ A: { next: [{ name: 'B' }, { name: 'C' }] } });
+  assert.match(nested, /\{\n\s+"name": "B"\n\s+\}/, `对象数组应展开：\n${nested}`);
+  // 长数字数组也展开，避免一行几百字符
+  const long = formatPipelineJson({ A: { roi: [1, 2, 3, 4, 5, 6, 7] } });
+  assert.match(long, /"roi": \[\n/, `超长数组应展开：\n${long}`);
+});
+
+test('formatPipelineJson: 输出总能被 JSON.parse 还原（不丢数据）', () => {
+  const doc = {
+    启动游戏: {
+      recognition: { type: 'DirectHit', param: {} },
+      action: { type: 'StartApp', param: { package: 'com.gof.china' } },
+      next: ['[JumpBack]通用弹窗处理', '等待游戏加载'],
+      pre_wait_freezes: { time: 2000, threshold: 0.95, target_offset: [0, 0, 0, 0] },
+      max_hit: 30,
+      enabled: true,
+      anchor: { A: 'B' },
+    },
+    等待游戏加载: { next: [] },
+  };
+  const text = formatPipelineJson(doc);
+  assert.deepEqual(JSON.parse(text), doc, '往返必须完全一致');
+});
+
+test('writePipelineDoc: 保存后按标准风格落盘（坐标数组不被打散）', () => {
+  const base = '__probe_style';
+  const file = path.join(PATHS.pipeline, `${base}.json`);
+  // 故意写成被打散的样子
+  fs.writeFileSync(
+    file,
+    JSON.stringify({ A: { recognition: { type: 'OCR', param: { roi: [1, 2, 3, 4] } }, next: [] } }, null, 2),
+  );
+  try {
+    const r = writePipelineDoc(base, fs.readFileSync(file, 'utf8'));
+    const after = fs.readFileSync(file, 'utf8');
+    assert.match(after, /"roi": \[1, 2, 3, 4\]/, `保存后 roi 应当在一行：\n${after}`);
+    assert.ok(
+      r.warnings.some((w) => w.message.includes('重新格式化')),
+      `内容有变化时应当提示重新格式化：${JSON.stringify(r.warnings)}`,
+    );
   } finally {
     fs.rmSync(file, { force: true });
   }

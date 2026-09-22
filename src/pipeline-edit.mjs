@@ -531,8 +531,17 @@ export function writePipelineDoc(base, text, options = {}) {
     warnings.push({ path: '', message: '原文件里有注释，保存后会丢失（原文件已自动备份）' });
   }
 
+  // 用本项目的手写风格落盘：短数字数组保持一行，避免保存一次就把整个文件重排
+  const formatted = `${formatPipelineJson(json)}\n`;
+  if (original.trim() && formatted.trim() !== original.trim()) {
+    warnings.push({
+      path: '',
+      message: '文件已按标准风格重新格式化（空行与手写对齐会变化，内容不变）',
+    });
+  }
+
   const backup = backupFile(target, PATHS.pipelineBackups);
-  writeFileAtomic(target, text.endsWith('\n') ? text : `${text}\n`);
+  writeFileAtomic(target, formatted);
   return { file: target, backup, warnings, nodes: Object.keys(json) };
 }
 
@@ -547,6 +556,47 @@ export function pipelineStats() {
   }));
   const orphans = index.nodes.filter((n) => n.referencedBy.length === 0).map((n) => `${n.base}:${n.node}`);
   return { docs, totalNodes: index.total, orphans };
+}
+
+/**
+ * 按本项目手写流水线的风格序列化 JSON。
+ *
+ * 为什么要自己写而不是直接 `JSON.stringify(obj, null, 2)`：
+ * 后者会把 `"roi": [0, 0, 0, 0]` 展开成四行，而人写流水线时坐标/阈值数组都是
+ * 一行的。保存一次就把整个文件重排，git diff 会变成几百行噪音，
+ * 真正的改动反而看不出来。
+ *
+ * 规则：
+ *   - 短数字数组（长度 ≤ 6 且全是 number）压成一行
+ *   - 其余保持 2 空格缩进
+ *   - 边界情况（例如元素本身是对象）退回标准序列化，保证输出始终合法
+ */
+export function formatPipelineJson(json) {
+  return stringifyStyled(json, 0);
+}
+
+const INLINE_ARRAY_MAX = 6;
+
+function stringifyStyled(value, depth) {
+  const pad = '  '.repeat(depth);
+  const padInner = '  '.repeat(depth + 1);
+
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) return '[]';
+    const inline = value.length <= INLINE_ARRAY_MAX && value.every((v) => typeof v === 'number');
+    if (inline) return `[${value.map((v) => JSON.stringify(v)).join(', ')}]`;
+    const items = value.map((v) => `${padInner}${stringifyStyled(v, depth + 1)}`);
+    return `[\n${items.join(',\n')}\n${pad}]`;
+  }
+
+  const keys = Object.keys(value);
+  if (keys.length === 0) return '{}';
+  const entries = keys.map(
+    (k) => `${padInner}${JSON.stringify(k)}: ${stringifyStyled(value[k], depth + 1)}`,
+  );
+  return `{\n${entries.join(',\n')}\n${pad}}`;
 }
 
 export { listPipelineFiles, baseNameOf };
