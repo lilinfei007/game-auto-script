@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "defaults": {
+    "instance": 0,
+    "retry": 0,
+    "taskTimeoutMs": 600000
+  },
+  "presets": []
+}

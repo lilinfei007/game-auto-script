@@ -179,6 +179,70 @@ test('createScheduler: 到点触发 onFire，且同一分钟不重复触发', as
   assert.equal(fired.length, 1);
 });
 
+test('createScheduler: 上一次还在跑时，同分钟再次 tick 也必须跳过（回归）', async () => {
+  // 真实场景：任务集跑得比 30s 的检查间隔还久。第一次 tick 触发的 onFire 还没返回，
+  // 第二次 tick 就来了。此时既不能重复触发（早先的 bug 会让上一次运行被记成
+  // stopped 然后重新起一轮），也不能因为 tick 被占用而漏记。
+  const fired = [];
+  let release = null;
+  const s = createScheduler({
+    getPresets: () => [{ id: 'a', name: 'A', schedule: { enabled: true, cron: '0 8 * * *' } }],
+    onFire: async (p) => {
+      fired.push(p.id);
+      await new Promise((r) => {
+        release = r;
+      });
+    },
+    now: fixedClock(new Date(2026, 8, 22, 8, 0, 5)),
+  });
+
+  const first = s.tick();
+  // 等 onFire 真的被调用
+  for (let i = 0; i < 100 && !release; i++) await new Promise((r) => setTimeout(r, 1));
+  assert.equal(fired.length, 1, '前提：第一次已经触发');
+
+  // 第一次还没结束，第二次 tick 来敲门 —— 必须被 busy 挡住
+  const second = await s.tick();
+  assert.equal(second.busy, true);
+  assert.equal(second.fired, 0);
+  assert.equal(fired.length, 1, '绝不能重复触发');
+
+  release();
+  await first;
+  assert.equal(fired.length, 1);
+
+  // 同分钟再 tick 仍然不触发
+  const third = await s.tick();
+  assert.equal(third.fired, 0);
+  assert.equal(fired.length, 1);
+  assert.equal(s.getHistory().filter((h) => h.result === 'fired').length, 1, '历史里只应有一条 fired');
+});
+
+test('createScheduler: 每次触发在历史里只记一条（回归）', async () => {
+  // 早先 appendHistory 与调用方都 unshift，界面上每次触发显示两条，
+  // 看起来像「触发了两次」，排查时会严重误导。
+  const s = createScheduler({
+    getPresets: () => [{ id: 'a', name: 'A', schedule: { enabled: true, cron: '0 8 * * *' } }],
+    onFire: async () => {},
+    now: fixedClock(new Date(2026, 8, 22, 8, 0, 30)),
+  });
+  await s.tick();
+  const history = s.getHistory();
+  assert.equal(history.filter((h) => h.result === 'fired').length, 1, JSON.stringify(history));
+});
+
+test('createScheduler: 忙碌跳过时历史也只记一条', async () => {
+  const s = createScheduler({
+    getPresets: () => [{ id: 'a', name: 'A', schedule: { enabled: true, cron: '0 8 * * *' } }],
+    onFire: async () => {},
+    canRun: () => false,
+    now: fixedClock(new Date(2026, 8, 22, 8, 0, 30)),
+  });
+  await s.tick();
+  const history = s.getHistory();
+  assert.equal(history.filter((h) => h.result === 'skipped').length, 1, JSON.stringify(history));
+});
+
 test('createScheduler: 未到点不触发', async () => {
   let count = 0;
   const s = createScheduler({

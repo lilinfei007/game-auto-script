@@ -17,7 +17,7 @@ export const KNOWN_FLAGS = new Set([
   // capture
   'count', 'interval', 'tag', 'out', 'ocr',
   // ui
-  'port', 'host', 'allow-remote', 'open', 'token',
+  'port', 'host', 'allow-remote', 'open', 'token', 'no-schedule',
   // record / replay
   'record', 'no-device',
   // 打包
@@ -56,6 +56,7 @@ export const USAGE = `
   --port N          ui 监听端口（默认 8848）
   --allow-remote    ui 允许非本机访问（默认只监听 127.0.0.1）
   --token VALUE     配合 --allow-remote：写操作需要的 X-Token（默认自动生成并打印）
+  --no-schedule     ui 启动后不执行任何定时任务（只想开着界面时用）
   --open            ui 启动后自动打开浏览器
   --verbose         打开 debug 日志
   -h, --help        显示本帮助

@@ -224,6 +224,14 @@ async function tapCenter(self, logger) {
   return true;
 }
 
+/** 已注册的自定义动作名（供界面提示「名字拼错了」，见 reco.mjs 同名导出）。 */
+export const CUSTOM_ACTIONS = [
+  'wjdr_pick_upgrade_target',
+  'wjdr_ensure_home',
+  'wjdr_dismiss_popup',
+  'wjdr_tap_center',
+];
+
 export function registerActions(resource, logger) {
   resource.register_custom_action('wjdr_pick_upgrade_target', (self) =>
     pickUpgradeTarget(self, logger),
@@ -231,7 +239,5 @@ export function registerActions(resource, logger) {
   resource.register_custom_action('wjdr_ensure_home', (self) => ensureHome(self, logger));
   resource.register_custom_action('wjdr_dismiss_popup', (self) => dismissPopup(self, logger));
   resource.register_custom_action('wjdr_tap_center', (self) => tapCenter(self, logger));
-  logger.info(
-    '已注册自定义动作：wjdr_pick_upgrade_target, wjdr_ensure_home, wjdr_dismiss_popup, wjdr_tap_center',
-  );
+  logger.info(`已注册自定义动作：${CUSTOM_ACTIONS.join(', ')}`);
 }

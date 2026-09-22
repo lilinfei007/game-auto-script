@@ -206,9 +206,14 @@ export function createScheduler(options) {
       });
   }
 
+  /**
+   * 追加一条调度历史。
+   *
+   * ⚠️ 这里**只负责落盘**，内存里的 `history` 由调用方维护。
+   * 早先两边都 unshift，导致界面上每次触发显示两条同样的事件 ——
+   * 「同一条历史出现两遍」看起来像重复触发，排查时会误导人。
+   */
   function appendHistory(entry) {
-    history.unshift(entry);
-    if (history.length > 50) history.length = 50;
     try {
       fs.mkdirSync(path.dirname(PATHS.scheduleLog), { recursive: true });
       if (fs.existsSync(PATHS.scheduleLog) && fs.statSync(PATHS.scheduleLog).size > SCHEDULE_LOG_MAX) {
@@ -218,6 +223,13 @@ export function createScheduler(options) {
     } catch (e) {
       logger.debug(`调度历史写入失败：${e.message}`);
     }
+  }
+
+  /** 记一条历史：内存 + 落盘，只在一处 unshift。 */
+  function recordHistory(entry) {
+    history.unshift(entry);
+    if (history.length > 50) history.length = 50;
+    appendHistory(entry);
   }
 
   /**
@@ -253,8 +265,7 @@ export function createScheduler(options) {
             result: 'skipped',
             reason: '已有任务在运行',
           };
-          history.unshift(entry);
-          appendHistory(entry);
+          recordHistory(entry);
           onEvent(`定时任务「${preset.name}」到点，但有任务在运行，跳过本次`, 'warn');
           continue;
         }
@@ -262,10 +273,7 @@ export function createScheduler(options) {
         lastFiredMinute.set(preset.id, key);
         fired++;
         onEvent(`定时任务触发：${preset.name}（${preset.schedule.cron}）`, 'info');
-        const entry = { ts: at.getTime(), presetId: preset.id, name: preset.name, result: 'fired' };
-        history.unshift(entry);
-        if (history.length > 50) history.length = 50;
-        appendHistory(entry);
+        recordHistory({ ts: at.getTime(), presetId: preset.id, name: preset.name, result: 'fired' });
         try {
           await onFire(preset, { trigger: 'schedule', at: at.getTime() });
         } catch (e) {

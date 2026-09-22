@@ -19,6 +19,7 @@ import { createLogger } from './util/log.mjs';
 import { registerCleanup } from './lifecycle.mjs';
 import * as events from './events.mjs';
 import { applyRuntimeOverrides } from './config.mjs';
+import { getPreset, resolvePresetRun } from './task-config.mjs';
 
 /** 判定「这像不像一个 maa 控制器」：只认真正会被用到的方法。 */
 export function isControllerLike(obj) {
@@ -321,6 +322,42 @@ export function createWebRunner(options = {}) {
         logger.info(`单节点试跑：${node}（超时 ${Math.round(timeoutMs / 1000)}s）`);
         return options.runNodeImpl(index, node, timeoutMs);
       });
+    },
+
+    /**
+     * 按任务集执行（HTTP 与定时调度器共用这一条入口）。
+     *
+     * 「读任务集 → 解析步骤 → 跑」全部放在服务端：界面只传 id，
+     * 因此运行的一定是磁盘上最新的编排，而不是界面上的陈旧副本。
+     *
+     * @param {string} presetId
+     * @param {object} [overrides] `{instance, retry, runtime, trigger}`
+     */
+    async runPresetById(presetId, overrides = {}) {
+      if (typeof options.taskConfigProvider !== 'function') {
+        throw new Error('未配置 taskConfigProvider，无法按任务集执行');
+      }
+      const store = options.taskConfigProvider();
+      const preset = getPreset(store.config, presetId);
+      if (!preset) throw new Error(`找不到任务集：${presetId}`);
+      const nodes = store.nodes ?? [];
+      const opts = resolvePresetRun(preset, nodes, overrides);
+      return runner.start({ ...opts, trigger: overrides.trigger ?? 'manual' });
+    },
+
+    /**
+     * 跑一遍环境自检，返回检查项数组（不退出进程，供界面展示）。
+     * 实现由 CLI 层注入，因为它要用到 maa 细节。
+     */
+    async doctor() {
+      if (typeof options.doctorImpl !== 'function') throw new Error('未配置自检实现');
+      return options.doctorImpl();
+    },
+
+    /** 取节点的框架级详情（合并默认值后的实际生效字段）。异步：要加载资源。 */
+    async pipelineNodeDetails(nodeNames) {
+      if (typeof options.nodeDetailsImpl !== 'function') return null;
+      return await options.nodeDetailsImpl(nodeNames);
     },
 
     // ---------------------------------------------------------- 实时画面

@@ -10,11 +10,39 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { PATHS, resolveInstance, pickInstances, sanitizeRuntimeOverrides } from './config.mjs';
+import {
+  PATHS,
+  resolveInstance,
+  pickInstances,
+  sanitizeRuntimeOverrides,
+  loadConfig,
+  validateConfig,
+} from './config.mjs';
 import * as events from './events.mjs';
 import { discoverModules, resolveEntry, validatePipelines } from './resource.mjs';
 import { decideEntries } from './cli-args.mjs';
 import { listInstances, ensureInstanceReady } from './device.mjs';
+import { backupFile, writeFileAtomic } from './util/fsx.mjs';
+import {
+  readTaskConfig,
+  writeTaskConfig,
+  validateTaskConfig,
+  describePreset,
+  resolvePresetRun,
+  applyStepOps,
+  getPreset,
+  upsertPreset,
+  removePreset,
+  uniquePresetId,
+  blankPreset,
+} from './task-config.mjs';
+import {
+  pipelineStats,
+  buildNodeIndex,
+  readPipelineDoc,
+  validatePipelineDoc,
+  writePipelineDoc,
+} from './pipeline-edit.mjs';
 
 /**
  * @typedef {object} WebRunner
@@ -92,6 +120,8 @@ export function listArtifacts() {
 /** 状态快照（给 /api/state 与 SSE 的首帧用）。 */
 export function buildState(config, appVersion, phase = null) {
   const currentPhase = phase ?? events.ext.phase;
+  const tasks = readTaskConfig();
+  const knownNodes = listPipelineNodes();
   return {
     app: { version: appVersion },
     config: {
@@ -106,6 +136,8 @@ export function buildState(config, appVersion, phase = null) {
       })),
     },
     modules: discoverModules(),
+    presets: tasks.config.presets.map((p) => describePreset(p, knownNodes)),
+    tasksFile: { exists: tasks.exists, mtime: tasks.mtime, errors: tasks.errors },
     device: events.ext.device,
     schedule: events.ext.schedule,
     runs: events.getRuns(20),
@@ -231,7 +263,9 @@ export function checkToken(req, token) {
 // ---------------------------------------------------------------- 路由
 
 async function handle(req, res, ctx) {
-  const { config, logger, runner, appVersion, host, token } = ctx;
+  const { logger, runner, appVersion, host, token } = ctx;
+  // 用 getConfig() 而不是解构出的 config：PUT /api/config 之后内存里的是新对象
+  const config = ctx.getConfig ? ctx.getConfig() : ctx.config;
   const url = new URL(req.url, 'http://localhost');
   const route = url.pathname;
 
@@ -560,7 +594,404 @@ async function handle(req, res, ctx) {
     return undefined;
   }
 
+  // ------------------------------------------------------------ 任务集
+
+  if (route.startsWith('/api/tasks')) {
+    return await handleTasks(req, res, url, route, ctx);
+  }
+
+  // ------------------------------------------------------------ 流水线编辑
+
+  if (route === '/api/pipelines') {
+    const stats = pipelineStats();
+    return sendJson(res, 200, { ...stats, index: buildNodeIndex().nodes });
+  }
+
+  if (route.startsWith('/api/pipelines/')) {
+    return await handlePipeline(req, res, route, ctx);
+  }
+
+  // ------------------------------------------------------------ 配置与自检
+
+  if (req.method === 'GET' && route === '/api/config') {
+    const { config: current, exists, errors, warnings } = loadConfig();
+    return sendJson(res, 200, { config: current, exists, errors, warnings, file: PATHS.configFile });
+  }
+
+  if (req.method === 'PUT' && route === '/api/config') {
+    return await handleConfigWrite(req, res, ctx);
+  }
+
+  if (req.method === 'POST' && route === '/api/doctor') {
+    if (!runner.doctor) return sendJson(res, 501, { error: '执行层未提供自检能力' });
+    if (events.ext.phase !== 'idle') {
+      return sendJson(res, 409, { error: '任务运行期间不能跑环境自检' });
+    }
+    try {
+      const checks = await runner.doctor();
+      const fatal = checks.filter((c) => !c.ok && c.fatal);
+      return sendJson(res, 200, {
+        checks,
+        passed: checks.filter((c) => c.ok).length,
+        total: checks.length,
+        failedFatal: fatal.length,
+      });
+    } catch (e) {
+      return sendJson(res, 500, { error: `自检失败：${e.message}` });
+    }
+  }
+
+  // ------------------------------------------------------------ 调度
+
+  if (req.method === 'GET' && route === '/api/schedule') {
+    const scheduler = ctx.scheduler;
+    return sendJson(res, 200, {
+      enabled: !!scheduler,
+      jobs: scheduler ? scheduler.jobs() : [],
+      history: scheduler ? scheduler.getHistory() : [],
+      state: events.ext.schedule,
+    });
+  }
+
+  if (req.method === 'POST' && route === '/api/schedule/check') {
+    if (!ctx.scheduler) return sendJson(res, 503, { error: '调度器未启动（用 --no-schedule 启动过？）' });
+    const result = await ctx.scheduler.tick();
+    return sendJson(res, 200, result);
+  }
+
   return sendJson(res, 404, { error: `未知路由 ${req.method} ${route}` });
+}
+
+// ---------------------------------------------------------------- 任务集处理器
+
+/** 从 `/api/tasks/presets/:id[/steps|/run]` 里切出 id 与子动作。 */
+export function parsePresetPath(route) {
+  const rest = route.slice('/api/tasks'.length).replace(/^\/+/, '');
+  if (rest === '') return { kind: 'root' };
+  const parts = rest.split('/').map((p) => decodeURIComponent(p));
+  if (parts[0] !== 'presets') return { kind: 'unknown' };
+  if (parts.length === 1) return { kind: 'presets' };
+  const id = parts[1];
+  if (parts.length === 2) return { kind: 'preset', id };
+  if (parts.length === 3 && parts[2] === 'steps') return { kind: 'steps', id };
+  if (parts.length === 3 && parts[2] === 'run') return { kind: 'run', id };
+  return { kind: 'unknown' };
+}
+
+async function handleTasks(req, res, url, route, ctx) {
+  const { logger, runner, taskConfig } = ctx;
+  const store = taskConfig ?? defaultTaskStore(logger);
+  const parsed = parsePresetPath(route);
+  const knownNodes = listPipelineNodes();
+
+  const readAll = () => {
+    const r = store.read();
+    return { ...r, described: r.config.presets.map((p) => describePreset(p, knownNodes)) };
+  };
+
+  // GET /api/tasks
+  if (req.method === 'GET' && parsed.kind === 'root') {
+    const r = readAll();
+    return sendJson(res, 200, {
+      exists: r.exists,
+      file: r.file,
+      mtime: r.mtime,
+      errors: r.errors,
+      warnings: r.warnings,
+      defaults: r.config.defaults,
+      presets: r.described,
+    });
+  }
+
+  if (req.method === 'POST' && parsed.kind === 'presets') {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      return sendJson(res, 400, { error: e.message });
+    }
+    const current = store.read();
+    const id = typeof body.id === 'string' && body.id ? body.id : uniquePresetId(current.config, 'preset');
+    if (getPreset(current.config, id)) {
+      return sendJson(res, 409, { error: `任务集 ${id} 已存在` });
+    }
+    const preset =
+      body.preset && typeof body.preset === 'object'
+        ? { ...body.preset, id }
+        : blankPreset(id, body.name ?? id);
+    const next = upsertPreset(current.config, preset);
+    return writeAndRespond(res, store, next, current, { knownNodes, logger });
+  }
+
+  if (parsed.kind === 'unknown') return sendJson(res, 404, { error: `未知路由 ${req.method} ${route}` });
+
+  if (parsed.kind === 'preset' || parsed.kind === 'steps' || parsed.kind === 'run') {
+    const current = store.read();
+    const preset = getPreset(current.config, parsed.id);
+    if (!preset) return sendJson(res, 404, { error: `找不到任务集：${parsed.id}` });
+
+    if (parsed.kind === 'run' && req.method === 'POST') {
+      if (events.ext.phase !== 'idle') {
+        return sendJson(res, 409, { error: `已有任务在${events.ext.phase === 'stopping' ? '停止中' : '运行中'}，请稍候` });
+      }
+      let body = {};
+      try {
+        body = await readBody(req);
+      } catch (e) {
+        return sendJson(res, 400, { error: e.message });
+      }
+      let opts;
+      try {
+        opts = resolvePresetRun(preset, knownNodes, {
+          instance: Number.isInteger(body.instance) ? body.instance : undefined,
+          retry: Number.isInteger(body.retry) ? body.retry : undefined,
+          runtime: sanitizeRuntimeOverrides(body.runtime).clean,
+        });
+      } catch (e) {
+        return sendJson(res, 400, { error: e.message });
+      }
+      events.setPhase('starting');
+      sendJson(res, 202, { started: true, options: { ...opts } });
+      try {
+        await runner.start({ ...opts, onReady: () => events.setPhase('running') });
+      } catch (e) {
+        logger.error(`任务集 ${parsed.id} 执行失败：${e.message}`);
+        events.publishLog({
+          ts: new Date().toISOString(),
+          level: 'error',
+          scope: 'web',
+          message: `任务集「${opts.presetName}」执行失败：${e.message}`,
+        });
+      } finally {
+        events.setPhase('idle');
+      }
+      return undefined;
+    }
+
+    if (parsed.kind === 'steps' && req.method === 'POST') {
+      let body;
+      try {
+        body = await readBody(req);
+      } catch (e) {
+        return sendJson(res, 400, { error: e.message });
+      }
+      // 两种写法：{ops:[...]} 批量；{order:[...]} / {entry,enabled} 单操作简写
+      const ops = Array.isArray(body.ops)
+        ? body.ops
+        : Array.isArray(body.order)
+          ? [{ op: 'reorder', order: body.order }]
+          : body.entry
+            ? [
+                body.enabled !== undefined
+                  ? { op: 'toggle', entry: body.entry, enabled: body.enabled }
+                  : { op: 'remove', entry: body.entry },
+              ]
+            : null;
+      if (!ops) return sendJson(res, 400, { error: '需要 ops 数组，或 order / entry 简写' });
+
+      const applied = applyStepOps(preset, ops);
+      if (!applied.preset) return sendJson(res, 422, { error: '步骤操作未通过校验', errors: applied.errors });
+      const next = upsertPreset(current.config, applied.preset);
+      return writeAndRespond(res, store, next, current, { knownNodes, logger });
+    }
+
+    if (parsed.kind === 'preset') {
+      if (req.method === 'PUT') {
+        let body;
+        try {
+          body = await readBody(req);
+        } catch (e) {
+          return sendJson(res, 400, { error: e.message });
+        }
+        const merged = { ...preset, ...body, id: preset.id };
+        if (merged.steps !== undefined && !Array.isArray(merged.steps)) {
+          return sendJson(res, 422, { error: 'steps 必须是数组（改顺序请用 /steps 接口）' });
+        }
+        const next = upsertPreset(current.config, merged);
+        return writeAndRespond(res, store, next, current, { knownNodes, logger });
+      }
+      if (req.method === 'DELETE') {
+        const next = removePreset(current.config, parsed.id);
+        return writeAndRespond(res, store, next, current, { knownNodes, logger });
+      }
+    }
+
+    return sendJson(res, 405, { error: `${req.method} 不被支持：${route}` });
+  }
+
+  return sendJson(res, 404, { error: `未知路由 ${req.method} ${route}` });
+}
+
+/** 校验 → 备份 → 原子写 → 让资源缓存失效。 */
+function writeAndRespond(res, store, nextConfig, current, { knownNodes, logger }) {
+  try {
+    const result = store.write(nextConfig, {
+      knownNodes,
+      expectedMtime: current.mtime,
+    });
+    logger.info(`任务集已保存：${result.file}${result.backup ? `（备份 ${result.backup}）` : ''}`);
+    const warnings = validateTaskConfig(nextConfig, { knownNodes }).warnings;
+    return sendJson(res, 200, {
+      saved: true,
+      file: result.file,
+      backup: result.backup,
+      warnings,
+      presets: nextConfig.presets.map((p) => describePreset(p, knownNodes)),
+    });
+  } catch (e) {
+    const conflict = /已被外部修改/.test(e.message);
+    return sendJson(res, conflict ? 409 : 422, { error: e.message });
+  }
+}
+
+/** 默认的任务集存储（未注入时用）。 */
+function defaultTaskStore() {
+  return {
+    read: () => readTaskConfig(),
+    write: (config, options) => writeTaskConfig(config, options),
+  };
+}
+
+// ---------------------------------------------------------------- 流水线处理器
+
+async function handlePipeline(req, res, route, ctx) {
+  const { logger, runner } = ctx;
+  const base = decodeURIComponent(route.slice('/api/pipelines/'.length));
+  const knownNodes = listPipelineNodes();
+
+  let doc;
+  try {
+    doc = readPipelineDoc(base);
+  } catch (e) {
+    return sendJson(res, 400, { error: e.message });
+  }
+  if (!doc) return sendJson(res, 404, { error: `找不到流水线：${base}` });
+
+  if (req.method === 'GET') {
+    const check = doc.ok
+      ? validatePipelineDoc(doc.json, {
+          knownNodes,
+          customRecognitions: ctx.customRecognitions ?? [],
+          customActions: ctx.customActions ?? [],
+        })
+      : { errors: [{ path: '', message: doc.error }], warnings: [] };
+    // 节点详情要加载资源（约 2 秒），失败不影响正文与校验结果
+    let details = null;
+    try {
+      details = await runner.pipelineNodeDetails?.(doc.nodes);
+    } catch (e) {
+      logger.debug(`取节点详情失败：${e.message}`);
+    }
+    return sendJson(res, 200, {
+      base: doc.base,
+      file: doc.file,
+      ext: doc.ext,
+      text: doc.text,
+      mtime: doc.mtime,
+      ok: doc.ok,
+      nodes: doc.nodes,
+      errors: check.errors,
+      warnings: check.warnings,
+      details,
+    });
+  }
+
+  if (req.method === 'POST') {
+    // 只校验不保存：界面边打字边查
+    let body;
+    try {
+      body = await readBody(req, 2 * 1024 * 1024);
+    } catch (e) {
+      return sendJson(res, 400, { error: e.message });
+    }
+    let json;
+    if (typeof body.text === 'string') {
+      try {
+        json = JSON.parse(body.text);
+      } catch (e) {
+        return sendJson(res, 200, { errors: [{ path: '', message: `不是合法 JSON：${e.message}` }], warnings: [] });
+      }
+    } else if (body.json && typeof body.json === 'object') {
+      json = body.json;
+    } else {
+      return sendJson(res, 400, { error: '需要 text 或 json 字段' });
+    }
+    const check = validatePipelineDoc(json, {
+      knownNodes,
+      customRecognitions: ctx.customRecognitions ?? [],
+      customActions: ctx.customActions ?? [],
+    });
+    return sendJson(res, 200, check);
+  }
+
+  if (req.method === 'PUT') {
+    let body;
+    try {
+      body = await readBody(req, 2 * 1024 * 1024);
+    } catch (e) {
+      return sendJson(res, 400, { error: e.message });
+    }
+    if (typeof body.text !== 'string') return sendJson(res, 400, { error: '需要 text 字段（新文件内容）' });
+    try {
+      const result = writePipelineDoc(doc.base, body.text, {
+        knownNodes,
+        expectedMtime: Number.isFinite(body.mtime) ? body.mtime : doc.mtime,
+        customRecognitions: ctx.customRecognitions ?? [],
+        customActions: ctx.customActions ?? [],
+      });
+      // 流水线变了：下次执行必须重新加载资源
+      runner.invalidateResource?.();
+      logger.info(`流水线已保存：${result.file}（${result.nodes.length} 个节点，备份 ${result.backup ?? '无'}）`);
+      return sendJson(res, 200, {
+        saved: true,
+        file: result.file,
+        backup: result.backup,
+        nodes: result.nodes,
+        warnings: result.warnings,
+      });
+    } catch (e) {
+      const conflict = /已被外部修改/.test(e.message);
+      const invalid = /校验未通过|不是合法 JSON|流水线名非法/.test(e.message);
+      return sendJson(res, conflict ? 409 : invalid ? 422 : 500, { error: e.message });
+    }
+  }
+
+  return sendJson(res, 405, { error: `${req.method} 不被支持：${route}` });
+}
+
+// ---------------------------------------------------------------- 配置写入
+
+async function handleConfigWrite(req, res, ctx) {
+  const { logger, setConfig, runner } = ctx;
+  let body;
+  try {
+    body = await readBody(req);
+  } catch (e) {
+    return sendJson(res, 400, { error: e.message });
+  }
+  if (!body.config || typeof body.config !== 'object') {
+    return sendJson(res, 400, { error: '需要 config 字段（完整配置对象）' });
+  }
+
+  // 路径存在性在这里是警告：保存一份「指向还没装的模拟器」的配置是合法操作，
+  // 真正的体检交给 doctor。
+  const { errors, warnings } = validateConfig(body.config);
+  if (errors.length > 0) {
+    return sendJson(res, 422, { error: '配置校验未通过', errors, warnings });
+  }
+
+  try {
+    const backup = backupFile(PATHS.configFile, PATHS.configBackups);
+    writeFileAtomic(PATHS.configFile, `${JSON.stringify(body.config, null, 2)}\n`);
+    // 两处都要更新：httphandler 读 configRef，执行层读它自己的 getConfig
+    if (ctx.configRef) ctx.configRef.current = body.config;
+    setConfig?.(body.config);
+    runner?.invalidateResource?.();
+    logger.info(`配置已保存：${PATHS.configFile}（备份 ${backup ?? '无'}）`);
+    return sendJson(res, 200, { saved: true, file: PATHS.configFile, backup, warnings });
+  } catch (e) {
+    return sendJson(res, 500, { error: `保存配置失败：${e.message}` });
+  }
 }
 
 /** 从查询串或请求体里取实例索引。 */
@@ -586,10 +1017,34 @@ export async function startWebServer({
   host = '127.0.0.1',
   appVersion = '0.0.0',
   token = null,
+  setConfig = null,
+  scheduler = null,
+  customRecognitions = [],
+  customActions = [],
 }) {
   if (!runner) throw new Error('startWebServer 需要 runner');
 
-  const ctx = { config, logger, runner, appVersion, host, token };
+  /**
+   * 可变配置：PUT /api/config 保存成功后要同时更新内存，
+   * 否则 `/api/state`、`/api/tasks` 这些读配置的接口还会用旧的
+   * （执行层通过 getConfig 已经拿到新的，两边会不一致）。
+   */
+  const configRef = { current: config };
+
+  const ctx = {
+    getConfig: () => configRef.current,
+    config,
+    configRef,
+    logger,
+    runner,
+    appVersion,
+    host,
+    token,
+    setConfig,
+    scheduler,
+    customRecognitions,
+    customActions,
+  };
   const server = http.createServer((req, res) => {
     handle(req, res, ctx).catch((e) => {
       logger?.error(`网页请求出错：${e.message}`);

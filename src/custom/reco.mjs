@@ -105,11 +105,19 @@ async function visible(self, logger) {
   return null;
 }
 
+/**
+ * 已注册的自定义识别名。
+ *
+ * 单独导出是为了让界面/校验器能提示「你写的名字本项目没注册」（拼错名字是最常见的错误），
+ * 而不是把名字散落在注册调用里。
+ */
+export const CUSTOM_RECOGNITIONS = ['wjdr_read_count', 'wjdr_find_march_slot', 'wjdr_visible'];
+
 export function registerRecognitions(resource, logger) {
   resource.register_custom_recognition('wjdr_read_count', (self) => readCount(self, logger));
   resource.register_custom_recognition('wjdr_find_march_slot', (self) =>
     findMarchSlot(self, logger),
   );
   resource.register_custom_recognition('wjdr_visible', (self) => visible(self, logger));
-  logger.info('已注册自定义识别：wjdr_read_count, wjdr_find_march_slot, wjdr_visible');
+  logger.info(`已注册自定义识别：${CUSTOM_RECOGNITIONS.join(', ')}`);
 }

@@ -145,11 +145,17 @@ export function publishSchedule(schedule) {
   bus.emit('schedule', schedule);
 }
 
-/** 记录一次调度事件（触发 / 跳过 / 报错），供界面显示历史。 */
+/**
+ * 记录一次调度事件（触发 / 跳过 / 报错），供界面显示历史。
+ *
+ * 只动 history 这一项：早先整体替换 `ext.schedule`，把 jobs / enabled 一起冲掉了，
+ * 于是「调度明明在跑，界面上却没启用、作业列表也是空的」。
+ */
 export function publishScheduleEvent(event) {
+  const prev = ext.schedule ?? {};
   ext.schedule = {
-    ...ext.schedule,
-    history: [{ ts: Date.now(), ...event }, ...(ext.schedule.history ?? [])].slice(0, 50),
+    ...prev,
+    history: [{ ts: Date.now(), ...event }, ...(prev.history ?? [])].slice(0, 50),
   };
   bus.emit('schedule', ext.schedule);
 }
@@ -227,6 +233,20 @@ export function startRun(entries, opts = {}) {
   if (runs.length > RUN_LIMIT) runs.length = RUN_LIMIT;
   ext.phase = 'running';
   syncFromRun();
+  /**
+   * 发布「运行开始」事件。
+   *
+   * 排查「一次执行变成两条记录」这类问题时，必须能看出每次 startRun 的
+   * 来源（trigger / preset）。这里只发事件、不直接写日志 —— 本模块刻意不依赖
+   * util/log.mjs（避免循环依赖），由 CLI 层订阅后按日志等级记录。
+   */
+  bus.emit('run/start', {
+    id: activeRun.id,
+    trigger: activeRun.trigger,
+    preset: activeRun.presetId,
+    entries: [...activeRun.entries],
+    at: activeRun.startedAt,
+  });
   bus.emit('run', { ...buildRunState() });
   publishState();
   return activeRun;

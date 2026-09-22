@@ -149,6 +149,20 @@ export async function runTasks(
   }, '停止任务');
 
   /** 跑一个入口，返回结果；不负责留证。 */
+  /**
+   * 单步超时表：入口 → 毫秒。没给就回落到 `runtime.taskTimeoutMs`。
+   *
+   * 这个能力来自任务集里的 `steps[].timeoutMs`（界面上可以逐个任务设）。
+   * 早先 `runTasks` 只把 `taskTimeoutMs` 写死读取，于是界面设的单步超时
+   * 传下来也不会生效 —— 接口看着有、实际没用，是最难发现的那类问题。
+   */
+  const stepTimeouts = options.stepTimeouts ?? {};
+  const timeoutFor = (entry) => {
+    const own = stepTimeouts[entry];
+    if (Number.isInteger(own) && own > 0) return own;
+    return config.runtime.taskTimeoutMs;
+  };
+
   const runOne = async (entry) => {
     logger.info(`▶ 开始任务：${entry}`);
     const started = Date.now();
@@ -157,19 +171,32 @@ export async function runTasks(
     recent = [];
 
     const job = tasker.post_task(entry, pipelineOverride).wait();
-    const timeoutMs = config.runtime.taskTimeoutMs;
+    const timeoutMs = timeoutFor(entry);
+    const ownTimeout = timeoutMs !== config.runtime.taskTimeoutMs;
+    if (ownTimeout) {
+      logger.debug(`  ${entry} 使用任务集里的单步超时 ${Math.round(timeoutMs / 1000)}s`);
+    }
 
+    /**
+     * 单一超时源：同一个 timer 既置 `timedOut` 又让竞速落地。
+     *
+     * 早先这里有两个同延时的 setTimeout（一个置标记、一个让 Promise.race 落地），
+     * 它们互相竞争，先触发的那个还可能被 `clearTimeout` 干掉 —— 超时会不会被判成
+     * 失败全看调度顺序。现在只有一条路径，行为确定。
+     */
     let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-    }, timeoutMs);
+    let timer = null;
+    const timeoutPromise = new Promise((resolve) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        resolve(false);
+      }, timeoutMs);
+      timer.unref?.();
+    });
 
     let ok = false;
     try {
-      ok = await Promise.race([
-        job.succeeded,
-        new Promise((resolve) => setTimeout(() => resolve(false), timeoutMs).unref?.()),
-      ]);
+      ok = await Promise.race([job.succeeded, timeoutPromise]);
     } finally {
       clearTimeout(timer);
     }
@@ -202,7 +229,23 @@ export async function runTasks(
   };
 
   const results = [];
-  events.beginRun(entries);
+
+  /**
+   * 运行记录由**调用方**创建。
+   *
+   * 执行层（runner-web）会带上 preset / trigger 等元信息调用 `events.startRun()`；
+   * 只有 CLI 直接调用 runTasks 时才需要在这里兜底建一条。
+   *
+   * ⚠️ 早先这里无条件 `events.beginRun(entries)`：在执行层已经建过记录的情况下，
+   * 它会把那条记录**顶掉**（记成 stopped），另起一条没有 trigger/preset 的空记录
+   * （trigger 落到默认的 'manual'）。现象是「一次定时执行变成两条记录、第一条是
+   * stopped」，看起来像重复触发，非常难查。
+   */
+  if (!events.getActiveRun()) {
+    events.beginRun(entries);
+  } else {
+    logger.debug('沿用调用方已创建的运行记录');
+  }
 
   try {
     for (const entry of entries) {

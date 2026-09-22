@@ -27,8 +27,19 @@ import {
   discoverModules,
   validatePipelines,
 } from './resource.mjs';
+import { CUSTOM_RECOGNITIONS } from './custom/reco.mjs';
+import { CUSTOM_ACTIONS } from './custom/action.mjs';
 import { createTasker, runTasks, buildPipelineOverride } from './runner.mjs';
 import { createWebRunner } from './runner-web.mjs';
+import {
+  readTaskConfig,
+  writeTaskConfig,
+  getPreset,
+  resolvePresetRun,
+  describePreset,
+} from './task-config.mjs';
+import { createScheduler } from './schedule.mjs';
+import { buildNodeIndex } from './pipeline-edit.mjs';
 import { initRuntime } from './runtime.mjs';
 import { createLogger, setLevel, setLogFile, closeLogFile, stamp } from './util/log.mjs';
 import { allOf, recognizeWithTasker } from './util/detail.mjs';
@@ -612,7 +623,144 @@ function buildUiRunner(getConfig, defaultIndex, logger) {
       );
       return { ok, results, entry: node };
     },
+
+    /**
+     * 任务集读取入口（给「按任务集执行」用）。
+     *
+     * 每次现读磁盘：界面刚保存的编排必须立刻生效，不能拿缓存里的旧副本。
+     * `nodes` 取自流水线文件本身，所以「按任务集跑」不依赖设备是否已连接。
+     */
+    taskConfigProvider: () => ({
+      ...readTaskConfig(),
+      nodes: collectPipelineNodes(),
+    }),
+
+    /** 界面上的环境自检：复用 doctor 的实现，但把结果收成数组返回。 */
+    doctorImpl: () => runDoctorChecks(getConfig(), logger),
+
+    /**
+     * 节点详情：用框架加载后的资源去问「这个节点实际生效的字段是什么」。
+     *
+     * ⚠️ 这里是 **async 且必须 await**：早先漏了 await，把 Promise 返回给上层，
+     * 上层 `for...of` 遍历 Promise 抛 TypeError 被静默吞掉，界面上表现为
+     * 「节点详情永远是空的」—— 而日志里资源明明加载成功了，极难定位。
+     */
+    async nodeDetailsImpl(nodeNames) {
+      const cfg = getConfig();
+      return await describeNodesWithFramework(cfg, nodeNames, logger);
+    },
   });
+}
+
+/** 汇总全部流水线文件里的节点名（不需要设备）。 */
+function collectPipelineNodes() {
+  return buildNodeIndex().nodes.map((n) => n.node);
+}
+
+/**
+ * 界面用的环境自检：不碰设备，只做「与运行无关但必须先成立」的检查。
+ *
+ * 刻意不复用 cmdDoctor 里那几项设备检查 —— 界面上点一下自检不该去拉起模拟器。
+ * 设备是否可用在界面上由实时画面/实例列表直接体现。
+ */
+async function runDoctorChecks(config, logger) {
+  const checks = [];
+  const add = (name, ok, detail, fatal = false) => checks.push({ name, ok, detail, fatal });
+
+  const major = Number(process.versions.node.split('.')[0]);
+  add('Node 版本', major >= 20, `v${process.versions.node}`, true);
+
+  const version = maa.Global?.version ?? '未知';
+  add('MaaFramework 版本', version === 'v5.13.1', version);
+
+  add('配置文件', fs.existsSync(PATHS.configFile), PATHS.configFile);
+
+  const ocr = checkOcrModel();
+  add('OCR 模型', ocr.ok, ocr.ok ? ocr.dir : `缺少 ${ocr.missing.join(', ')}`);
+
+  const pipes = validatePipelines();
+  const badPipes = pipes.filter((p) => !p.ok);
+  add(
+    '流水线解析',
+    pipes.length > 0 && badPipes.length === 0,
+    badPipes.length === 0 ? `${pipes.length} 个文件全部可解析` : badPipes.map((p) => `${p.file}: ${p.error}`).join('；'),
+  );
+
+  const modules = discoverModules();
+  const usable = modules.filter((m) => m.ok);
+  add('可执行模块', usable.length > 0, usable.map((m) => `${m.base}→${m.entry}`).join(', '));
+
+  const tasks = readTaskConfig();
+  const knownNodes = collectPipelineNodes();
+  const described = tasks.config.presets.map((p) => describePreset(p, knownNodes));
+  add(
+    '任务集',
+    tasks.errors.length === 0,
+    tasks.exists
+      ? `${described.length} 个（${described.filter((p) => p.runnable).length} 个有启用步骤）` +
+          (tasks.errors.length ? `；${tasks.errors.join('；')}` : '')
+      : '尚未创建 config/tasks.json（界面里新建即可）',
+  );
+
+  if (tasks.warnings.length > 0) add('任务集提示', true, tasks.warnings.join('；'));
+
+  try {
+    const all = await listInstances(config, logger);
+    const target = config.instances[0]?.index ?? 0;
+    const inst = all.find((i) => i.index === target);
+    add(
+      'MuMu 实例',
+      all.length > 0,
+      all.length === 0
+        ? `读取不到实例（检查 mumu.manager: ${config.mumu.manager}）`
+        : `共 ${all.length} 个；目标 ${target}：${inst ? (inst.isAndroidStarted ? '运行中' : '已停止') : '不存在'}`,
+    );
+  } catch (e) {
+    add('MuMu 实例', false, e.message);
+  }
+
+  const summary = {
+    passed: checks.filter((c) => c.ok).length,
+    total: checks.length,
+    failedFatal: checks.filter((c) => !c.ok && c.fatal).length,
+  };
+  logger.info(`界面自检完成：${summary.passed}/${summary.total} 通过`);
+  return checks;
+}
+
+/**
+ * 用框架问「这些节点实际生效的字段是什么」。
+ *
+ * `resource.get_node_data_parsed(name)` 返回的是**合并默认值之后**的完整定义：
+ * `[JumpBack]` 会展开成 `jump_back: true`、`pre_wait_freezes` 会展开成对象、
+ * 默认的 `rate_limit` / `max_hit` / `pre_delay` 都在里面。写的是文件，看到的是
+ * 框架的真实解释 —— 这正是写流水线时最需要的信息。
+ *
+ * ⚠️ 需要真的加载资源（约 2 秒），失败就返回 null 让界面降级显示，不阻塞编辑。
+ */
+async function describeNodesWithFramework(config, nodeNames, logger) {
+  try {
+    const { resource, nodes } = await createResource(config, logger);
+    const out = {};
+    for (const name of nodeNames ?? []) {
+      if (!nodes.includes(name)) {
+        out[name] = { ok: false, error: '资源里没有这个节点' };
+        continue;
+      }
+      let parsed = null;
+      try {
+        parsed = resource.get_node_data_parsed(name);
+      } catch (e) {
+        out[name] = { ok: false, error: e.message };
+        continue;
+      }
+      out[name] = { ok: true, merged: parsed, raw: resource.get_node_data(name) ?? null };
+    }
+    return out;
+  } catch (e) {
+    logger?.debug(`取节点详情失败：${e.message}`);
+    return null;
+  }
 }
 
 async function cmdUi(config, args, logger) {
@@ -654,6 +802,58 @@ async function cmdUi(config, args, logger) {
   const runner = buildUiRunner(getConfig, defaultIndex, logger);
   runner.installCleanup();
 
+  /**
+   * 订阅「运行开始」，把每次执行的来源记进日志。
+   *
+   * 排查「一次执行变成两条记录」这类问题时，这一行是唯一能区分
+   * 「调度器重复触发」还是「接口被重复调用」的依据。
+   */
+  events.bus.on('run/start', (r) => {
+    logger.debug(
+      `运行开始 id=${r.id} trigger=${r.trigger} preset=${r.preset ?? '-'} 任务数=${r.entries.length}`,
+    );
+  });
+
+  /**
+   * 调度器：到点自动跑任务集。
+   *
+   * `getPresets` 每次 tick 现读磁盘，界面刚保存的定时立刻生效；
+   * `canRun` 保证「有任务在跑就跳过本次」而不是排队堆积。
+   */
+  let scheduler = null;
+  if (args['no-schedule'] !== true) {
+    scheduler = createScheduler({
+      getPresets: () => readTaskConfig().config.presets,
+      canRun: () => runner.getPhase() === 'idle',
+      onFire: async (preset, info) => {
+        logger.info(`定时触发任务集「${preset.name}」（${info.trigger}）`);
+        await runner.runPresetById(preset.id, { trigger: 'schedule' });
+      },
+      onEvent: (msg, level = 'info') => {
+        if (level === 'error') logger.error(msg);
+        else if (level === 'warn') logger.warn(msg);
+        else logger.info(msg);
+        events.publishScheduleEvent({
+          level,
+          message: msg,
+          type: 'scheduler',
+        });
+      },
+      logger,
+    });
+    scheduler.start();
+    registerCleanup(() => scheduler.stop(), '停止调度器');
+    const jobs = scheduler.jobs();
+    if (jobs.length > 0) {
+      logger.info(`已加载 ${jobs.length} 个定时任务：`);
+      for (const j of jobs) {
+        logger.info(`  ${j.ok ? j.nextText : `(cron 有误) ${j.error}`}  ${j.name}`);
+      }
+    }
+  } else {
+    logger.info('已用 --no-schedule 启动：本次不执行任何定时任务');
+  }
+
   const server = await startWebServer({
     config,
     logger,
@@ -662,6 +862,10 @@ async function cmdUi(config, args, logger) {
     host,
     appVersion: appVersion(),
     token,
+    setConfig,
+    scheduler,
+    customRecognitions: CUSTOM_RECOGNITIONS,
+    customActions: CUSTOM_ACTIONS,
   });
   registerCleanup(() => server.close(), '关闭网页服务');
 

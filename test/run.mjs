@@ -24,5 +24,7 @@ import './zip.test.mjs';
 import './schedule.test.mjs';
 import './tasks.test.mjs';
 import './runner-web.test.mjs';
+import './runner.test.mjs';
 import './device.test.mjs';
 import './webapi.test.mjs';
+import './pipeline-edit.test.mjs';
