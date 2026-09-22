@@ -669,7 +669,11 @@ async function main() {
 
   const command = args._[0] ?? 'doctor';
 
-  const { config, exists, errors, warnings } = loadConfig();
+  // doctor 是「环境体检」，路径不存在在这里必须是致命错误；
+  // 其它命令只要用不到模拟器就不该被它挡住（例如 list / run --dry-run / ui）。
+  const { config, exists, errors, warnings } = loadConfig({
+    strictPaths: command === 'doctor',
+  });
 
   // 先用安全的等级把日志建起来：config.runtime.logLevel 本身可能就是错的，
   // 早先直接 setLevel(配置值) 会抛未捕获异常，反而看不到「配置错误」的提示。

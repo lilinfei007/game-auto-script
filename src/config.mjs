@@ -18,6 +18,8 @@ export const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 export const PATHS = {
   root: ROOT,
   configFile: path.join(ROOT, 'config', 'config.json'),
+  /** 任务集（模块组合 + 顺序 + 开关 + 参数），入库存放。 */
+  tasksFile: path.join(ROOT, 'config', 'tasks.json'),
   resource: path.join(ROOT, 'resource'),
   pipeline: path.join(ROOT, 'resource', 'pipeline'),
   image: path.join(ROOT, 'resource', 'image'),
@@ -27,6 +29,11 @@ export const PATHS = {
   onError: path.join(ROOT, 'debug', 'on_error'),
   draws: path.join(ROOT, 'debug', 'draws'),
   recording: path.join(ROOT, 'debug', 'recording'),
+  /** 从界面改配置/流水线前的自动备份（保留最近若干份）。 */
+  configBackups: path.join(ROOT, 'debug', 'config-backups'),
+  pipelineBackups: path.join(ROOT, 'debug', 'pipeline-backups'),
+  /** 调度执行历史（JSON Lines）。 */
+  scheduleLog: path.join(ROOT, 'debug', 'schedule.jsonl'),
   docsReference: path.join(ROOT, 'docs', 'reference'),
 };
 
@@ -71,9 +78,12 @@ function deepMerge(base, override) {
 
 /**
  * 读取并校验配置。文件不存在时返回默认配置（并标记 created=false）。
+ *
+ * @param {object} [options]
+ * @param {boolean} [options.strictPaths=false] 路径不存在算错误（doctor 用）
  * @returns {{ config: object, exists: boolean, errors: string[], warnings: string[] }}
  */
-export function loadConfig() {
+export function loadConfig(options = {}) {
   const errors = [];
   const warnings = [];
   let raw = {};
@@ -90,7 +100,7 @@ export function loadConfig() {
   }
 
   const config = deepMerge(DEFAULT_CONFIG, raw);
-  const { errors: verrs, warnings: vwarns } = validateConfig(config);
+  const { errors: verrs, warnings: vwarns } = validateConfig(config, options);
   errors.push(...verrs);
   warnings.push(...vwarns);
 
@@ -101,27 +111,39 @@ export function loadConfig() {
  * 校验一份**已合并**的配置。
  *
  * 抽成纯函数是为了可测：loadConfig 要读真实文件，而校验规则本身不该依赖文件系统。
+ *
+ * 关于路径存在性：默认可执行文件**找不到只给警告**，不给错误。
+ * 理由：`validateConfig` 的结果会挡住整个进程启动，而界面、`list`、`run --dry-run`、
+ * 流水线校验这些功能根本不需要模拟器。找不到路径这件事由 `doctor` 报成致命错误
+ * （它本来就会实际连一次设备），那时才是真正该拦下来的地方。
+ *
+ * @param {object} config
+ * @param {object} [options]
+ * @param {boolean} [options.strictPaths=false] 为 true 时路径不存在算错误（doctor 用）
  * @returns {{errors: string[], warnings: string[]}}
  */
-export function validateConfig(config) {
+export function validateConfig(config, options = {}) {
   const errors = [];
   const warnings = [];
+  const strictPaths = options.strictPaths === true;
+  /** 路径类问题：严格模式进 errors，否则进 warnings。 */
+  const pathIssue = (msg) => (strictPaths ? errors.push(msg) : warnings.push(msg));
 
   // --- 校验 mumu ---
   if (!config.mumu?.path) {
     errors.push('mumu.path 未设置');
   } else if (!fs.existsSync(config.mumu.path)) {
-    errors.push(`找不到 MuMu 安装目录: ${config.mumu.path}`);
+    pathIssue(`找不到 MuMu 安装目录: ${config.mumu.path}`);
   }
   if (!config.mumu?.manager) {
     errors.push('mumu.manager 未设置');
   } else if (!fs.existsSync(config.mumu.manager)) {
-    errors.push(`找不到 MuMuManager.exe: ${config.mumu.manager}`);
+    pathIssue(`找不到 MuMuManager.exe: ${config.mumu.manager}`);
   }
   if (!config.mumu?.adb) {
     errors.push('mumu.adb 未设置');
   } else if (!fs.existsSync(config.mumu.adb)) {
-    errors.push(`找不到 adb.exe: ${config.mumu.adb}`);
+    pathIssue(`找不到 adb.exe: ${config.mumu.adb}`);
   }
   if (
     !Number.isInteger(config.mumu?.basePort) ||
@@ -257,7 +279,76 @@ export function pickInstances(config, index) {
 
 /** 确保 debug 相关目录存在。 */
 export function ensureDebugDirs() {
-  for (const d of [PATHS.debug, PATHS.onError, PATHS.draws]) {
+  for (const d of [PATHS.debug, PATHS.onError, PATHS.draws, PATHS.recording]) {
     fs.mkdirSync(d, { recursive: true });
   }
 }
+
+/** 允许从界面覆盖的运行时参数及其类型（防止把垃圾字段写进 config）。 */
+export const RUNTIME_OVERRIDE_TYPES = {
+  shortSide: 'int',
+  launchTimeoutMs: 'int',
+  taskTimeoutMs: 'int',
+  saveDraws: 'bool',
+  saveOnError: 'bool',
+  saveFailureShot: 'bool',
+  logLevel: 'logLevel',
+};
+
+/**
+ * 过滤一份运行时参数覆盖：丢掉未知字段与类型不符的值。
+ *
+ * 界面传上来的东西不可信，而 `config.runtime` 会直接影响执行行为
+ * （例如 `taskTimeoutMs` 写成字符串会让超时判断失效），所以统一在这里收口。
+ *
+ * @returns {{clean: object, rejected: Array<{key:string, reason:string}>}}
+ */
+export function sanitizeRuntimeOverrides(override) {
+  const clean = {};
+  const rejected = [];
+  if (override === undefined || override === null) return { clean, rejected };
+  if (typeof override !== 'object' || Array.isArray(override)) {
+    return { clean, rejected: [{ key: '(整体)', reason: '必须是对象' }] };
+  }
+
+  for (const [key, value] of Object.entries(override)) {
+    const kind = RUNTIME_OVERRIDE_TYPES[key];
+    if (!kind) {
+      rejected.push({ key, reason: '不是可覆盖的运行时参数' });
+      continue;
+    }
+    if (kind === 'int') {
+      if (!Number.isInteger(value) || value <= 0) {
+        rejected.push({ key, reason: '必须是正整数' });
+        continue;
+      }
+    } else if (kind === 'bool') {
+      if (typeof value !== 'boolean') {
+        rejected.push({ key, reason: '必须是布尔值' });
+        continue;
+      }
+    } else if (kind === 'logLevel') {
+      if (!LOG_LEVELS.includes(value)) {
+        rejected.push({ key, reason: `必须是 ${LOG_LEVELS.join(' / ')} 之一` });
+        continue;
+      }
+    }
+    clean[key] = value;
+  }
+  return { clean, rejected };
+}
+
+/**
+ * 在**内存里**套用运行时参数覆盖，返回新配置对象。
+ *
+ * 刻意不写盘：界面上的临时调整（本次跑重试 2 次、临时关掉失败截图）
+ * 不应该污染 `config/config.json`。要永久生效请走 PUT /api/config。
+ *
+ * @returns {{config: object, rejected: Array<{key:string, reason:string}>}}
+ */
+export function applyRuntimeOverrides(config, override) {
+  const { clean, rejected } = sanitizeRuntimeOverrides(override);
+  if (Object.keys(clean).length === 0) return { config, rejected };
+  return { config: { ...config, runtime: { ...config.runtime, ...clean } }, rejected };
+}
+

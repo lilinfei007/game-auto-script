@@ -1,0 +1,29 @@
+refactor(平台): 抽出可测的执行层与任务集/调度/原子写基座
+
+平台化改造第一步：把「连设备 → 建控制器 → 加载资源 → 跑任务」收成唯一入口，
+供 HTTP 接口与定时调度器共用，并补齐后续要用的纯逻辑模块。
+
+新增：
+- src/runner-web.mjs   执行层唯一入口（可注入假依赖，故可单测）
+    · 单实例互斥：控制器操作全部经串行队列，任务运行期间拒绝手动操作
+    · 控制器常驻：实时画面用的控制器任务结束后不销毁，下次直接复用
+    · 运行时参数覆盖：只影响本次执行，不写回 config.json
+    · 单步超时：steps[].timeoutMs 透传到 runTasks
+- src/task-config.mjs  任务集（config/tasks.json）：有序 + 可开关 + 可带参数
+    · 纯函数校验/规范化/重排/开关/合并，文件读写走原子写 + 自动备份
+- src/schedule.mjs     自带 5 段 cron 解析 + 调度器（时间可注入，完全可测）
+    · 运行中跳过本次并记账，不排队堆积；历史落 debug/schedule.jsonl
+- src/util/fsx.mjs     原子写 + 备份（保留最近 10 份）+ JSON 读写
+- tools/lint-comments.mjs  排查「块注释里出现星号加斜杠导致提前闭合」的坑
+
+修复（都是本次改动暴露出来的真实问题）：
+- events.mjs  运行注册表：新增 run 记录（id/preset/trigger/steps/status/results/nodes），
+              begin/setCurrent/addResult/end 保持兼容语义；修正 endRun 后 finishedAt 被
+              反向覆盖成 null 的回归（syncFromRun 曾回退读取已结束的记录）
+- config.mjs  validateConfig 的路径存在性默认只给警告（strictPaths 才是错误）：
+              否则没装模拟器的机器连 list / run --dry-run / ui 都起不来。
+              doctor 用严格模式，仍然报致命错误
+- config.mjs  新增 applyRuntimeOverrides / sanitizeRuntimeOverrides（白名单 + 类型校验）
+- index.mjs   doctor 走 strictPaths；test/run.mjs 先建 debug/ 目录（干净克隆后缺失）
+
+测试：110 → 184 条全绿（新增 schedule/tasks/runner-web 三个文件）

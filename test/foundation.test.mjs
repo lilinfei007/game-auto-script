@@ -86,15 +86,24 @@ test('validateConfig: 各类非法值都能被指出来', () => {
   }
 });
 
-test('validateConfig: 路径不存在会报错', () => {
+test('validateConfig: 路径不存在时是警告，strictPaths 下才是错误', () => {
   const c = goodConfig();
   c.mumu.path = 'D:/绝对不存在的目录';
   c.mumu.adb = 'D:/绝对不存在的目录/adb.exe';
   c.mumu.manager = 'D:/绝对不存在的目录/MuMuManager.exe';
-  const { errors } = validateConfig(c);
-  assert.ok(errors.some((e) => /找不到 MuMu 安装目录/.test(e)), JSON.stringify(errors));
-  assert.ok(errors.some((e) => /找不到 adb/.test(e)), JSON.stringify(errors));
-  assert.ok(errors.some((e) => /找不到 MuMuManager/.test(e)), JSON.stringify(errors));
+
+  // 默认：只警告。否则没装模拟器的机器连界面 / --dry-run 都起不来
+  const soft = validateConfig(c);
+  assert.deepEqual(soft.errors, [], '路径不存在不应挡住启动');
+  assert.ok(soft.warnings.some((w) => /找不到 MuMu 安装目录/.test(w)), JSON.stringify(soft.warnings));
+  assert.ok(soft.warnings.some((w) => /找不到 adb/.test(w)), JSON.stringify(soft.warnings));
+  assert.ok(soft.warnings.some((w) => /找不到 MuMuManager/.test(w)), JSON.stringify(soft.warnings));
+
+  // doctor 用严格模式：路径不存在必须报致命错误
+  const strict = validateConfig(c, { strictPaths: true });
+  assert.ok(strict.errors.some((e) => /找不到 MuMu 安装目录/.test(e)), JSON.stringify(strict.errors));
+  assert.ok(strict.errors.some((e) => /找不到 adb/.test(e)), JSON.stringify(strict.errors));
+  assert.ok(strict.errors.some((e) => /找不到 MuMuManager/.test(e)), JSON.stringify(strict.errors));
 });
 
 test('validateConfig: 占位符包名只给警告不给错误', () => {
