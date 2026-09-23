@@ -1,0 +1,84 @@
+{
+  "常规活动": {
+    "recognition": {
+      "type": "DirectHit",
+      "param": {}
+    },
+    "action": {
+      "type": "Custom",
+      "param": {
+        "custom_action": "wjdr_ensure_home",
+        "custom_action_param": {
+          "maxAttempts": 6
+        }
+      }
+    },
+    "next": [
+      "[JumpBack]通用弹窗处理",
+      "常规活动_打开活动页"
+    ],
+    "on_error": [
+      "回到主界面"
+    ]
+  },
+
+  "常规活动_打开活动页": {
+    "recognition": {
+      "type": "OCR",
+      "param": {
+        "expected": "^常规活动$",
+        "roi": [625, 165, 95, 45]
+      }
+    },
+    "action": {
+      "type": "Click",
+      "param": {}
+    },
+    "post_delay": 2000,
+    "next": [
+      "[JumpBack]通用弹窗处理",
+      "常规活动_领奖励"
+    ],
+    "on_error": [
+      "回到主界面"
+    ]
+  },
+
+  "常规活动_领奖励": {
+    "recognition": {
+      "type": "OCR",
+      "param": {
+        "expected": "^领取$",
+        "roi": [530, 760, 110, 60]
+      }
+    },
+    "action": {
+      "type": "Click",
+      "param": {}
+    },
+    "post_delay": 1800,
+    "max_hit": 3,
+    "next": [
+      "[JumpBack]通用弹窗处理",
+      "常规活动_领奖励",
+      "常规活动_完成"
+    ],
+    "on_error": [
+      "常规活动_完成"
+    ]
+  },
+
+  "常规活动_完成": {
+    "recognition": {
+      "type": "DirectHit",
+      "param": {}
+    },
+    "action": {
+      "type": "DoNothing",
+      "param": {}
+    },
+    "next": [
+      "回到主界面"
+    ]
+  }
+}
