@@ -43,7 +43,7 @@ npm run fetch-assets         # 下载 OCR 模型与 v5.13.1 官方文档
 npm run doctor               # 环境自检：按需拉起模拟器、连 adb、截一张图
 ```
 
-`doctor` 全绿（11/11）后即可运行：
+`doctor` 全绿（13/13）后即可运行：
 
 ```bash
 npm run run                              # 按 config 里的任务列表执行
