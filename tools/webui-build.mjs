@@ -24,14 +24,15 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UI_DIR = path.join(ROOT, 'src', 'webui');
 const CONFIG_FILE = path.join(UI_DIR, 'vite.config.mjs');
-const DIST_DIR = path.join(UI_DIR, 'dist');
-const ENTRY = path.join(DIST_DIR, 'index.html');
-const force = process.argv.includes('--force');
+
+/** 构建产物目录与入口；`tools/build-portable.mjs` 也用它做打包校验。 */
+export const WEBUI_DIST = path.join(UI_DIR, 'dist');
+export const WEBUI_ENTRY = path.join(WEBUI_DIST, 'index.html');
 
 /** dist 里的 index.html 是否比 src/webui 下任何源文件都新。 */
 function isFresh() {
-  if (!fs.existsSync(ENTRY)) return false;
-  const built = fs.statSync(ENTRY).mtimeMs;
+  if (!fs.existsSync(WEBUI_ENTRY)) return false;
+  const built = fs.statSync(WEBUI_ENTRY).mtimeMs;
   const walk = (dir) => {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const p = path.join(dir, e.name);
@@ -47,14 +48,24 @@ function isFresh() {
   return walk(UI_DIR);
 }
 
-async function main() {
+/**
+ * 构建控制台。
+ *
+ * @param {object} [options]
+ * @param {boolean} [options.force] 跳过「已最新」判断，强制重建
+ * @param {boolean} [options.quiet] 不打印「已是最新 / 构建完成」这类进度信息
+ * @returns {Promise<boolean>} 是否产出了可用的构建产物
+ */
+export async function buildWebui({ force = false, quiet = false } = {}) {
+  const info = quiet ? () => {} : (m) => console.log(m);
+
   if (!fs.existsSync(path.join(UI_DIR, 'index.html'))) {
     console.warn('[webui] 找不到 src/webui/index.html，跳过构建');
-    return;
+    return false;
   }
   if (!force && isFresh()) {
-    console.log('[webui] 控制台已是最新，跳过构建（要强制重建：npm run webui:build）');
-    return;
+    info('[webui] 控制台已是最新，跳过构建（要强制重建：npm run webui:build）');
+    return true;
   }
 
   let vite;
@@ -65,19 +76,23 @@ async function main() {
   } catch (e) {
     console.warn(`[webui] 读不到前端依赖或配置（${e.code ?? e.message}），跳过构建；界面会退回内联页。`);
     console.warn('[webui] 想用 Vue 控制台：npm install（devDependencies 里有 vite 与 @vitejs/plugin-vue）');
-    return;
+    return false;
   }
 
   const t0 = Date.now();
   try {
     await vite.build({ ...userConfig, configFile: false });
-    console.log(`[webui] 构建完成：${path.relative(ROOT, ENTRY)}（${Date.now() - t0}ms）`);
+    info(`[webui] 构建完成：${path.relative(ROOT, WEBUI_ENTRY)}（${Date.now() - t0}ms）`);
+    return true;
   } catch (e) {
     // 构建失败不该让 `npm run ui` 起不来：内联页仍然可用
     console.warn(`[webui] 构建失败：${e.message}`);
     console.warn('[webui] 界面会退回内联页；修好前端代码后再跑 npm run webui:build');
-    process.exitCode = 0;
+    return false;
   }
 }
 
-await main();
+// 只有被当作脚本直接运行时才构建；被 build-portable.mjs import 时不该有副作用
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await buildWebui({ force: process.argv.includes('--force') });
+}

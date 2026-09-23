@@ -16,6 +16,7 @@ import path from 'node:path';
 import { PATHS } from '../src/config.mjs';
 import { zipDirectory } from '../src/util/zip.mjs';
 import { run } from '../src/util/exec.mjs';
+import { buildWebui, WEBUI_DIST, WEBUI_ENTRY } from './webui-build.mjs';
 
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(`--${f}`);
@@ -198,6 +199,10 @@ console.log(`  选项：${withNode ? '带 node.exe ' : ''}${wantZip ? '打 zip '
 fs.rmSync(outDir, { recursive: true, force: true });
 fs.mkdirSync(outDir, { recursive: true });
 
+// 先把控制台构建出来再拷：启动器是直接 `node src\index.mjs ui`，不走 npm 的 preui，
+// 所以包里有什么 dist 就发什么。dist 在 src/ 下面，不会被 isExcluded 的根级规则排掉。
+await buildWebui({ quiet: true });
+
 const copied = copyTree(PATHS.root, outDir);
 writeLaunchers(outDir);
 
@@ -247,6 +252,30 @@ if (missing > 0) {
   process.exit(1);
 }
 console.log('  ✔ 必要文件齐全（含原生绑定与 DLL）');
+
+/**
+ * 控制台是可选件：没构建出来时界面会退回内联页，包仍然可用，所以不判失败。
+ * 但「dist 拷进来了、它引用的资源却丢了」必须当失败 —— 那种包打开就是白屏，
+ * 比没有控制台更难查。
+ */
+let lostConsoleAssets = 0;
+const packedEntry = path.join(outDir, path.relative(PATHS.root, WEBUI_ENTRY));
+if (fs.existsSync(packedEntry)) {
+  const refs = [...fs.readFileSync(packedEntry, 'utf8').matchAll(/(?:src|href)="\.\/([^"]+)"/g)].map((m) => m[1]);
+  const lost = refs.filter((r) => !fs.existsSync(path.join(outDir, path.relative(PATHS.root, WEBUI_DIST), r)));
+  if (lost.length) {
+    console.error(`  ✘ 控制台缺少它引用的资源：${lost.join('、')}`);
+    lostConsoleAssets = lost.length;
+  } else {
+    console.log(`  ✔ 控制台齐全（${refs.length} 个资源）`);
+  }
+} else {
+  console.warn('  ! 这个包里没有 Vue 控制台，界面会退回内联页（先 npm install 再打包即可）');
+}
+if (lostConsoleAssets > 0) {
+  console.error(`打包失败：控制台缺少 ${lostConsoleAssets} 个资源`);
+  process.exit(1);
+}
 
 // ---------------------------------------------------------------- 实跑校验
 // 「文件都在」不等于「跑得起来」：曾经因为排除规则误伤 node_modules/.../dist，

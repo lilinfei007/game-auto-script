@@ -310,6 +310,10 @@ node tools/build-portable.mjs --out D:/somewhere # 指定输出目录
 打出来的目录里有五个中文启动器：`环境自检.cmd`、`执行日常.cmd`、`启动界面.cmd`、
 `录制回放自检.cmd`、`离线回放自检.cmd`。
 
+打包时会先把 Vue 控制台构建出来再拷贝（启动器直接跑 `node src\index.mjs ui`，
+不经过 npm 的 `preui`，所以包里有什么 `dist` 就发什么），并校验包里的
+`index.html` 及其引用的资源都在；没装前端依赖时只告警，包照出、界面退回内联页。
+
 > 打包产物 `dist/` **不入库**（含 80MB 的 `node.exe`，会被 GitHub 拒绝），已加进 `.gitignore`。
 > 打包脚本末尾会自动实跑一次产物做校验，缺原生绑定或 DLL 会直接失败。
 
