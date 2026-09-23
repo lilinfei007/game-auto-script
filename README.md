@@ -37,6 +37,9 @@
 
 ## 快速开始
 
+> 第一次上手建议先看 **[docs/GUIDE.md](docs/GUIDE.md)**：怎么跑、pipeline 怎么写、用哪些工具，
+> 一份文档讲完。下面是精简版。
+
 ```bash
 npm install                  # 安装依赖（唯一依赖 maa-node）
 npm run fetch-assets         # 下载 OCR 模型与 v5.13.1 官方文档
@@ -162,6 +165,7 @@ resource/
 config/config.json        设备与运行参数
 config/tasks.json         任务集（编排 / 顺序 / 开关 / 单步超时 / 定时；不入库）
 tools/                    诊断与编写工具（webui-build / webui-dev / webui-smoke 见上）
+docs/GUIDE.md             使用指南：怎么跑、pipeline 怎么写、用哪些工具
 docs/WEBUI.md             Web 接口契约与扩展指南
 docs/reference/           拉取的 v5.13.1 官方文档（不入库）
 debug/                    日志、失败截图、可视化、录制、自动备份、调度历史（不入库）
