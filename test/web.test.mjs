@@ -47,6 +47,9 @@ before(async () => {
     runner,
     port: 0, // 让系统分配空闲端口，避免和真实 ui 冲突
     appVersion: '9.9.9',
+    // 这里断言的是内联兜底页：显式关掉 Vue 控制台，
+    // 否则本机构建过 src/webui/dist 之后这些用例会换一个页面（见 webui.test.mjs）
+    webuiDir: false,
   });
   base = server.url.replace(/\/$/, '');
 });

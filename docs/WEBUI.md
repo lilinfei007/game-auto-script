@@ -1,11 +1,13 @@
 # Web 控制台：接口契约与扩展指南
 
-这份文档面向「以后要自己改这个平台」的人。界面本身分两步走：
+这份文档面向「以后要自己改这个平台」的人。界面分两层，但**下面这套 HTTP/SSE 契约
+对两层都成立**，所以照着它写前端 / 加接口都不会白写：
 
-- **现在**：`src/web.mjs` 里的内联单页 HTML（无构建、无 CDN、无前端依赖），
-  已经能完成「编排任务集 → 执行 → 看实时画面 → 改 pipeline」的闭环。
-- **之后**：Vue 3 + Vite 的控制台（计划中的阶段 3）。届时界面换成 Vue，
-  但下面这套 HTTP/SSE 契约**不变**，所以现在就可以照它写前端。
+- **控制台**（阶段 3，已完成）：`src/webui/` 的 Vue 3 + Vite 工程，`ui` 默认就挂它。
+- **内联兜底页**：`src/web.mjs` 底部的单页 HTML（无构建、无依赖）。没装前端依赖
+  或构建失败时自动回落，保证 `npm run ui` 永远能用。
+
+工程结构、构建 / 开发 / 冒烟命令见 [第 4 节](#4-改界面加面板)。
 
 ---
 
@@ -74,7 +76,8 @@
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/` | 内联控制台页面 |
+| GET | `/` | 控制台页面（`src/webui/dist` 的构建产物；没有时回落到内联页） |
+| GET | `/assets/*` | 控制台静态资源（带内容哈希，可长缓存；缺失返回 404 而不是回落 HTML） |
 | GET | `/api/state` | 全量快照：配置、模块、任务集、设备、调度、最近 20 次运行 |
 | GET | `/api/events` | SSE：`snapshot` / `log` / `node` / `task` / `state` / `device` / `schedule` / `run` |
 | POST | `/api/run` | 执行。body：`{steps?, tasks?, instance?, retry?, runtime?}` → `202` |
@@ -204,19 +207,55 @@
 
 ---
 
-## 4. 加一个界面面板的步骤
+## 4. 改界面、加面板
 
-1. 需要一个新数据：先看 `/api/state` 里有没有。有就直接用，别加接口。
-2. 需要写操作：在 `src/web.mjs` 的 `handle()` 里加分支。它是一串
+### 4.1 控制台工程（`src/webui/`）
+
+```text
+src/webui/
+  index.html          Vite 入口（只挂 #app）
+  vite.config.mjs     root=本目录，产物 dist/（已 gitignore）
+  src/main.js         挂载 Vue
+  src/api.js          所有接口的封装：统一错误、401/409/422 的语义、X-Token
+  src/store.js        SSE 长连接 + 状态快照 + 日志缓冲 + 提示条（reactive，不用 Pinia）
+  src/App.vue         外壳：顶栏 + 左栏运行控制 + 右栏标签页
+  src/components/     RunPanel / LivePanel / TasksPanel / PipelinePanel /
+                      LogPanel / DevicePanel / SchedulePanel / ArtifactsPanel
+```
+
+| 命令 | 作用 |
+|---|---|
+| `npm run ui` | 起服务；`preui` 会按需构建控制台（已最新则跳过） |
+| `npm run webui:build` | 强制重建 |
+| `npm run webui:dev` | 前端热更新（5273），`/api` 代理到 `npm run ui` 的 8848 |
+| `npm run webui:smoke` | 冒烟：不装浏览器，逐个面板 SSR 渲染，确认不会白屏 |
+
+两条约定值得留意：
+
+- **`src/webui/dist` 不入库**，但 `src/web.mjs` 会自动探测它：有就用控制台，
+  没有就用内联页。所以「干净 clone → `npm run ui`」永远不会因为没构建而失败。
+- **构建脚本把配置对象直接传给 Vite（`configFile: false`）**。走配置文件时
+  Vite 会用自己的解析器加载它，那条路径不读 `resolve.preserveSymlinks`，
+  在受限沙箱里会踩到 Windows 网络驱动器探测（同步 `net use`）抛 `EPERM`。
+  详见 `src/webui/vite.config.mjs` 里 `preserveSymlinks` 的注释。
+
+### 4.2 加一个面板
+
+1. **先看数据够不够**：需要一个新数据，先看 `/api/state` 里有没有。有就直接用，
+   别加接口。
+2. **需要写操作**：在 `src/web.mjs` 的 `handle()` 里加分支。它是一串
    `if (req.method === 'GET' && route === '/api/xxx')`，**不引入路由框架**；
    带路径参数的（如 `/api/tasks/presets/:id`）用 `startsWith` + 自己切分，
    参考 `parsePresetPath()`。
-3. 业务逻辑写进对应的纯函数模块（`task-config.mjs` / `pipeline-edit.mjs` /
+3. **业务逻辑写进纯函数模块**（`task-config.mjs` / `pipeline-edit.mjs` /
    `schedule.mjs`），接口层只做「读→校验→写→回包」。
    这样逻辑能用 `node:test` 单测，不需要起 HTTP 服务。
-4. 写操作务必：先校验、再 `backupFile`、再 `writeFileAtomic`，
+4. **前端**：在 `src/webui/src/components/` 加一个 `.vue`，接口调用只写进
+   `src/api.js`（组件里不直接 `fetch`），然后在 `App.vue` 的 `TABS` 里注册。
+   顺手在 `tools/webui-smoke.mjs` 的 `PANELS` 里加一行，保证它至少能渲染。
+5. **写操作务必**：先校验、再 `backupFile`、再 `writeFileAtomic`，
    并支持 `expectedMtime` 冲突检测。
-5. 界面每加一个会改状态的操作，思考「任务运行期间能不能做」——
+6. **界面每加一个会改状态的操作**，思考「任务运行期间能不能做」——
    不能就返回 `409`，别让它和正在跑的任务抢设备。
 
 ## 5. 常见调试手法

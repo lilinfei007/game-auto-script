@@ -18,3 +18,6 @@ config/tasks.json
 
 # 截图原始素材（由 tools/capture.mjs 生成，仅保留裁剪后的模板）
 resource/image/_raw/
+
+# 换机器时导入的会话日志（把导出的 session.v3.jsonl 解到这里，不随仓库走）
+.dsh-session-load/

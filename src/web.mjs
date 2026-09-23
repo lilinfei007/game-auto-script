@@ -4,7 +4,9 @@
  * 设计要点：
  *  - 运行逻辑通过 `runner` 注入（见下方 WebRunner），因此本模块不依赖设备，
  *    可以用假的 runner 做单元测试。
- *  - 页面是内联的单文件 HTML，没有构建步骤、不引用任何 CDN。
+ *  - 界面有两套：`src/webui/dist` 里的 Vue 控制台（阶段 3，`npm run webui:build`
+ *    生成）优先；没有构建产物时回落到本文件底部的内联单页 HTML。两套都不引用
+ *    任何 CDN —— 内联页是零依赖，Vue 产物是本地打包的。
  *  - 截图接口做了目录穿越防护：解析后的路径必须仍在 debug/ 内。
  */
 import http from 'node:http';
@@ -115,6 +117,84 @@ export function listArtifacts() {
       .slice(0, ARTIFACT_LIMIT);
   };
   return { onError: pick(PATHS.onError, 'on_error'), draws: pick(PATHS.draws, 'draws') };
+}
+
+// ---------------------------------------------------------------- 控制台静态资源
+
+/** 控制台构建产物里会出现的扩展名 → content-type；没命中的一律不服务。 */
+const WEBUI_MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.ico': 'image/x-icon',
+  '.woff2': 'font/woff2',
+  '.txt': 'text/plain; charset=utf-8',
+};
+
+/**
+ * 把 URL 路径解析成控制台目录下的真实文件。
+ *
+ * - 命中认识的扩展名 → `{ file, fallback:false }`
+ * - 路径没有扩展名（SPA 内部路由，例如 `/tasks`）→ `{ file: index.html, fallback:true }`
+ * - 越界（`..`、编码后的分隔符、空字节）或扩展名不认识 → `null`
+ *
+ * 纯函数，便于单测；真正的「存在与否」判断留给调用方。
+ */
+export function resolveWebuiFile(root, route) {
+  if (typeof route !== 'string' || typeof root !== 'string' || route === '') return null;
+  let rel;
+  try {
+    rel = decodeURIComponent(route);
+  } catch {
+    return null;
+  }
+  if (rel.includes('\0')) return null;
+  const base = path.resolve(root);
+  // 先归一化成以 / 开头的 POSIX 路径，再拼到 base 上：这样 `..` 会先被吃掉，
+  // 之后的 startsWith 检查能挡住所有越界写法
+  const target = path.resolve(base, `.${path.posix.normalize(`/${rel.replace(/\\/g, '/')}`)}`);
+  if (target !== base && !target.startsWith(base + path.sep)) return null;
+  const ext = path.extname(target).toLowerCase();
+  if (ext === '') return { file: path.join(base, 'index.html'), fallback: true };
+  if (!WEBUI_MIME[ext]) return null;
+  return { file: target, fallback: false };
+}
+
+/**
+ * 用控制台构建产物响应一个 GET。
+ *
+ * @returns {boolean} true 表示已经响应（false 时调用方继续走后面的路由）
+ */
+function serveWebui(res, webuiDir, route) {
+  const hit = resolveWebuiFile(webuiDir, route);
+  if (!hit) return false;
+  const indexHtml = path.join(path.resolve(webuiDir), 'index.html');
+  let file = hit.file;
+  if (!fs.existsSync(file)) {
+    // 带扩展名的资源不存在就是没命中（交给后面 404），
+    // 否则前端会把一坨 HTML 当 JS 执行，报错位置离真正原因很远
+    if (!hit.fallback) return false;
+    file = indexHtml;
+    if (!fs.existsSync(file)) return false;
+  }
+  const ext = path.extname(file).toLowerCase();
+  const buf = fs.readFileSync(file);
+  res.writeHead(200, {
+    'content-type': WEBUI_MIME[ext] ?? 'application/octet-stream',
+    'content-length': buf.length,
+    // Vite 产物文件名带内容哈希，可以长缓存；index.html 必须每次校验
+    'cache-control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable',
+  });
+  res.end(buf);
+  return true;
 }
 
 /** 状态快照（给 /api/state 与 SSE 的首帧用）。 */
@@ -286,6 +366,12 @@ async function handle(req, res, ctx) {
    * 两份状态会漂移（runner 已经忙了，网页还以为空闲）。
    */
   const setPhase = (phase) => events.setPhase(phase);
+
+  // 控制台：构建产物优先（Vue 版），没构建时回落到下面的内联页。
+  // 放在 `/api/*` 之外，所以接口路由不受影响。
+  if (req.method === 'GET' && ctx.webuiDir && !route.startsWith('/api/')) {
+    if (serveWebui(res, ctx.webuiDir, route)) return undefined;
+  }
 
   if (req.method === 'GET' && route === '/') {
     return sendText(res, 200, renderPage(), 'text/html; charset=utf-8');
@@ -1049,8 +1135,25 @@ function instanceOf(url, body = {}) {
 // ---------------------------------------------------------------- 服务
 
 /**
+ * 控制台构建产物的默认位置（`npm run webui:build` 生成，已 gitignore）。
+ */
+export const DEFAULT_WEBUI_DIR = path.join(PATHS.root, 'src', 'webui', 'dist');
+
+/** 决定这次用哪个界面：显式目录 > 自动探测构建产物 > 内联页。 */
+function pickWebuiDir(webuiDir) {
+  if (webuiDir === false) return null;
+  if (typeof webuiDir === 'string' && webuiDir) {
+    return fs.existsSync(path.join(webuiDir, 'index.html')) ? webuiDir : null;
+  }
+  return fs.existsSync(path.join(DEFAULT_WEBUI_DIR, 'index.html')) ? DEFAULT_WEBUI_DIR : null;
+}
+
+/**
  * 启动网页服务。
- * @returns {Promise<{url: string, port: number, host: string, close: () => Promise<void>}>}
+ * @param {object} [options]
+ * @param {string|false} [options.webuiDir] 控制台构建产物目录；`false` 强制用内联页，
+ *   不传则自动探测 `src/webui/dist`（没有就回落内联页）。
+ * @returns {Promise<{url: string, port: number, host: string, webui: string|null, close: () => Promise<void>}>}
  */
 export async function startWebServer({
   config,
@@ -1064,6 +1167,7 @@ export async function startWebServer({
   scheduler = null,
   customRecognitions = [],
   customActions = [],
+  webuiDir = undefined,
 }) {
   if (!runner) throw new Error('startWebServer 需要 runner');
 
@@ -1073,6 +1177,7 @@ export async function startWebServer({
    * （执行层通过 getConfig 已经拿到新的，两边会不一致）。
    */
   const configRef = { current: config };
+  const resolvedWebui = pickWebuiDir(webuiDir);
 
   const ctx = {
     getConfig: () => configRef.current,
@@ -1087,6 +1192,7 @@ export async function startWebServer({
     scheduler,
     customRecognitions,
     customActions,
+    webuiDir: resolvedWebui,
   };
   const server = http.createServer((req, res) => {
     handle(req, res, ctx).catch((e) => {
@@ -1109,6 +1215,11 @@ export async function startWebServer({
   const url = `http://${shownHost}:${actual.port}/`;
 
   logger?.info(`网页界面已启动：${url}`);
+  if (resolvedWebui) {
+    logger?.info(`控制台：Vue 构建产物 ${resolvedWebui}`);
+  } else {
+    logger?.info('控制台：内联页（要换成 Vue 控制台：npm install && npm run webui:build）');
+  }
   if (host !== '127.0.0.1') {
     logger?.warn(`注意：服务监听在 ${host}，局域网内其它机器也能访问（无鉴权）`);
   }
@@ -1117,6 +1228,7 @@ export async function startWebServer({
     url,
     port: actual.port,
     host,
+    webui: resolvedWebui,
     close: () =>
       new Promise((resolve) => {
         server.close(() => resolve());

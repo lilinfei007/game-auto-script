@@ -12,7 +12,11 @@
     "run": "node src/index.mjs run",
     "list": "node src/index.mjs list",
     "capture": "node src/index.mjs capture",
+    "preui": "node tools/webui-build.mjs",
     "ui": "node src/index.mjs ui",
+    "webui:build": "node tools/webui-build.mjs --force",
+    "webui:dev": "node tools/webui-dev.mjs",
+    "webui:smoke": "node tools/webui-smoke.mjs",
     "record": "node src/index.mjs record",
     "replay": "node src/index.mjs replay",
     "selftest:replay": "node tools/selftest-replay.mjs --replay-only",
@@ -21,5 +25,10 @@
   },
   "dependencies": {
     "@maaxyz/maa-node": "5.13.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.9",
+    "vite": "^8.3.0",
+    "vue": "^3.5.43"
   }
 }

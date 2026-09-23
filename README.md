@@ -61,7 +61,7 @@ node src/index.mjs capture --count 5     # 采图供裁剪模板
 | `node src/index.mjs run [--instance N] [--tasks a,b]` | 执行任务 |
 | `node src/index.mjs list` | 列出实例、流水线文件与关键配置 |
 | `node src/index.mjs capture [--count N] [--tag T]` | 批量截图到 `resource/image/_raw/<T>/` |
-| `node src/index.mjs ui [--port N] [--open]` | 本地 Web UI：实时事件流（SSE）、任务启停、实时画面、任务集编排、pipeline 编辑、定时 |
+| `node src/index.mjs ui [--port N] [--open]` | 本地 Web 控制台：实时事件流（SSE）、任务启停、实时画面与手动操作、任务集编排、pipeline 编辑、定时 |
 | `node src/index.mjs record <文件>` | 录制一次真实操作，供离线回放 |
 | `node src/index.mjs replay <文件>` | 离线回放回归，不需要模拟器 |
 
@@ -76,6 +76,23 @@ node src/index.mjs capture --count 5     # 采图供裁剪模板
 
 界面里的写操作还有 `Origin` 校验（防 DNS rebinding）：浏览器从非本机页面发起的
 写请求一律 403。`GET` 不校验令牌，所以局域网里只读实时画面是被允许的。
+
+### Web 控制台（Vue 3 + Vite）
+
+`ui` 默认就把 `src/webui` 构建出来的控制台挂在 `/`。它由 Vite 打包成
+`src/webui/dist`（不入库），**没有任何 CDN 依赖**；`npm run ui` 会先跑 `preui`
+检查是否需要重新构建。
+
+| 命令 | 作用 |
+|---|---|
+| `npm run ui` | 起服务（会自动构建控制台；已经是最新就跳过） |
+| `npm run webui:build` | 强制重新构建控制台 |
+| `npm run webui:dev` | 只起前端热更新（默认 5273），接口反向代理到 `npm run ui` 的 8848 |
+| `npm run webui:smoke` | 冒烟：不装浏览器，把每个面板渲染一遍，确认不会白屏 |
+
+没装前端依赖（`npm install --omit=dev`）或构建失败时，`ui` **不会**因此起不来：
+`src/web.mjs` 里保留了一份内联单页兜底，启动日志会写明这次用的是哪一个。
+控制台面板：运行控制 / 实时画面 / 任务集 / 流水线 / 日志 / 设备与配置 / 调度 / 产物。
 
 ### 诊断工具（`tools/`）
 
@@ -115,8 +132,16 @@ src/
   task-config.mjs   任务集读写与纯逻辑（校验/排序/开关/解析）
   pipeline-edit.mjs 流水线校验与安全写入（引用完整性、目录穿越防护、备份）
   schedule.mjs      自带 5 段 cron 解析 + 调度器
-  web.mjs           本地 Web 服务：REST + SSE + 内联控制台页面
+  web.mjs           本地 Web 服务：REST + SSE + 控制台静态资源（无构建产物时兜底内联页）
   replay.mjs        离线录制 / 回放
+  webui/            Vue 3 控制台（阶段 3）：Vite 工程 + 组件，产物 dist/ 不入库
+    index.html        Vite 入口
+    vite.config.mjs   构建配置（root 即本目录，产物 dist/）
+    src/App.vue       外壳：顶栏 + 运行控制 + 标签页面板
+    src/api.js        全部 HTTP 接口封装（统一错误与 X-Token）
+    src/store.js      SSE 长连接 + 状态快照 + 日志缓冲 + 提示条
+    src/components/   RunPanel / LivePanel / TasksPanel / PipelinePanel /
+                      LogPanel / DevicePanel / SchedulePanel / ArtifactsPanel
   custom/
     reco.mjs        自定义识别：wjdr_read_count / wjdr_find_march_slot / wjdr_visible
     action.mjs      自定义动作：wjdr_pick_upgrade_target / wjdr_ensure_home /
@@ -135,7 +160,7 @@ resource/
   model/ocr/              OCR 模型（由 fetch-assets 下载，不入库）
 config/config.json        设备与运行参数
 config/tasks.json         任务集（编排 / 顺序 / 开关 / 单步超时 / 定时；不入库）
-tools/                    诊断与编写工具
+tools/                    诊断与编写工具（webui-build / webui-dev / webui-smoke 见上）
 docs/WEBUI.md             Web 接口契约与扩展指南
 docs/reference/           拉取的 v5.13.1 官方文档（不入库）
 debug/                    日志、失败截图、可视化、录制、自动备份、调度历史（不入库）
@@ -319,4 +344,5 @@ npm run doctor    # 改动后先跑自检，确认链路未坏
 - [x] **P5** 本地 Web UI（`ui`，SSE 实时事件 + 并发守卫）
 - [x] **P6** 离线录制/回放（`record` / `replay` + 回归自检）
 - [x] **P7** 打包与分发（`tools/build-portable.mjs`、启动器 `.cmd`、zip）
-- [ ] **P8** 九个任务模块全部完成后：多开参数化验证 + 完整离线回归
+- [x] **P8** Web 控制台（Vue 3 + Vite：任务集编排、pipeline 编辑、实时画面与手动操作、日志、调度、产物）
+- [ ] **P9** 九个任务模块全部完成后：多开参数化验证 + 完整离线回归

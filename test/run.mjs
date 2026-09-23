@@ -19,6 +19,7 @@ import './core.test.mjs';
 import './util.test.mjs';
 import './foundation.test.mjs';
 import './web.test.mjs';
+import './webui.test.mjs';
 import './replay.test.mjs';
 import './zip.test.mjs';
 import './schedule.test.mjs';
