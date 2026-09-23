@@ -11,6 +11,7 @@
 import maa from '@maaxyz/maa-node';
 import { resolveInstance } from './config.mjs';
 import { ensureInstanceReady } from './device.mjs';
+import { adbPath as resolveAdbPath } from './mumu-detect.mjs';
 import { saveImage, readImageSize, shortSide } from './util/image.mjs';
 
 /** 位或若干掩码（maa-node 的 Uint64 以字符串暴露，故用 BigInt）。 */
@@ -38,7 +39,7 @@ export function decodeMethods(mask, table) {
 export async function findDevice(config, address, logger) {
   let devices = [];
   try {
-    devices = (await maa.AdbController.find(config.mumu.adb)) ?? [];
+    devices = (await maa.AdbController.find(resolveAdbPath(config))) ?? [];
   } catch (e) {
     logger?.warn(`AdbController.find 失败：${e.message}（将使用配置中的默认值）`);
   }
@@ -90,7 +91,7 @@ export async function createController(config, instanceConfig, logger) {
   const ready = await ensureInstanceReady(config, index, logger);
   const match = await findDevice(config, ready.address, logger);
 
-  const adbPath = match?.[1] ?? config.mumu.adb;
+  const adbPath = match?.[1] ?? resolveAdbPath(config);
   const screencap = orMethods(
     match?.[3] ?? maa.AdbScreencapMethod.Default,
     maa.AdbScreencapMethod.EmulatorExtras,

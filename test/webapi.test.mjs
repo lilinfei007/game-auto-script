@@ -607,6 +607,35 @@ test('PUT /api/config: 非法配置返回 422 且不落盘', async () => {
   assert.equal(bad.status, 400);
 });
 
+test('PUT /api/config: 自动检测出来的 MuMu 路径不会写回 config.json', async (t) => {
+  const before = fs.readFileSync(PATHS.configFile, 'utf8');
+  try {
+    // 界面拿到的配置里带着自动检测补上的路径
+    const { config: resolved } = await (await get('/api/config')).json();
+    if (!resolved.mumu?.manager) return t.skip('本机没有 MuMu，这条不适用');
+
+    const r = await fetch(base + '/api/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ config: resolved }),
+    });
+    assert.equal(r.status, 200);
+
+    // 落盘时应当把「自动检测填的」剔掉：否则点一次保存就把本机路径
+    // 固化进入了库的 config.json，换台机器就又不通了
+    const disk = JSON.parse(fs.readFileSync(PATHS.configFile, 'utf8'));
+    assert.equal(disk.mumu.manager, undefined, '自动检测的 manager 不该落盘');
+    assert.equal(disk.mumu.path, undefined, '自动检测的 path 不该落盘');
+
+    // 再读一次：自动检测照常工作，路径依旧可用，只是没被固化进文件
+    const again = await (await get('/api/config')).json();
+    assert.ok(again.config.mumu.manager, '保存之后仍然应当能自动检测到 MuMu');
+    assert.equal(again.config.runtime.taskTimeoutMs, resolved.runtime.taskTimeoutMs, '其它字段照常落盘');
+  } finally {
+    fs.writeFileSync(PATHS.configFile, before);
+  }
+});
+
 test('PUT /api/config: 合法配置会落盘、生成备份，并回写内存配置', async () => {
   const { config: real } = JSON.parse(
     JSON.stringify({ config: (await (await get('/api/config')).json()).config }),

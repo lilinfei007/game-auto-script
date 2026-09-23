@@ -158,14 +158,31 @@
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/config` | 当前配置 + 校验结果 |
+| GET | `/api/config` | 当前配置 + 校验结果 + `mumu`（自动检测说明） |
 | PUT | `/api/config` | 保存：校验 → 备份 → 原子写 → 回写内存 → 资源缓存失效 |
 | POST | `/api/doctor` | 跑一遍自检（**不碰设备**），返回检查项数组 |
 | GET | `/api/device` | MuMu 实例列表 + 当前设备状态 |
 | POST | `/api/device/launch` | 拉起实例（`202` 后异步执行） |
 
+`GET /api/config` 返回的 `config.mumu` 里，路径可能是**自动检测**补上的
+（见 `src/mumu-detect.mjs`）。所以额外给一个字段说明来源：
+
+```jsonc
+{
+  "config": { "mumu": { "path": "D:\\MuMu", "manager": "…", "adb": "…" } },
+  "mumu": {
+    "text": "D:\\MuMu\\nx_main\\MuMuManager.exe（自动检测：扫描目录 D:\\）；adb=…",
+    "detection": { "source": "扫描目录 D:\\", "filled": ["path", "manager", "adb"], "values": { } }
+  }
+}
+```
+
 保存配置时**路径不存在只给警告**：保存一份「指向还没装的模拟器」的配置是合法操作，
 真正的体检交给 `doctor`（它用严格模式，路径不存在是致命错误）。
+
+保存时还会把「自动检测填进去、用户没改过」的 MuMu 路径**剔掉再落盘**：
+`config/config.json` 是入库文件，固化了本机路径换台机器就又不通了。
+用户改过的值（与检测结果不同）原样保留 —— 那是明确的覆盖意图。
 
 ### 实时画面与手动操作
 

@@ -25,6 +25,7 @@ import { discoverModules, resolveEntry, validatePipelines } from './resource.mjs
 import { decideEntries } from './cli-args.mjs';
 import { listInstances, ensureInstanceReady } from './device.mjs';
 import { backupFile, writeFileAtomic } from './util/fsx.mjs';
+import { describeMumu, getMumuDetection, stripDetectedMumuPaths } from './mumu-detect.mjs';
 import {
   readTaskConfig,
   writeTaskConfig,
@@ -744,7 +745,16 @@ async function handle(req, res, ctx) {
 
   if (req.method === 'GET' && route === '/api/config') {
     const { config: current, exists, errors, warnings } = loadConfig();
-    return sendJson(res, 200, { config: current, exists, errors, warnings, file: PATHS.configFile });
+    return sendJson(res, 200, {
+      config: current,
+      exists,
+      errors,
+      warnings,
+      file: PATHS.configFile,
+      // MuMu 的路径是自动检测出来的（见 mumu-detect.mjs），把「从哪找到的」
+      // 一并给界面，省得用户对着三条路径猜它们是怎么来的
+      mumu: { text: describeMumu(current), detection: getMumuDetection() },
+    });
   }
 
   if (req.method === 'PUT' && route === '/api/config') {
@@ -1111,7 +1121,11 @@ async function handleConfigWrite(req, res, ctx) {
 
   try {
     const backup = backupFile(PATHS.configFile, PATHS.configBackups);
-    writeFileAtomic(PATHS.configFile, `${JSON.stringify(body.config, null, 2)}\n`);
+    // 落盘时把「自动检测填进去、用户没改过」的 MuMu 路径剔掉：
+    // 否则界面里点一次保存就把本机路径固化进入库的 config.json 了。
+    // 内存里仍然保留解析后的完整配置（执行层要用）。
+    const toSave = stripDetectedMumuPaths(body.config);
+    writeFileAtomic(PATHS.configFile, `${JSON.stringify(toSave, null, 2)}\n`);
     // 两处都要更新：httphandler 读 configRef，执行层读它自己的 getConfig
     if (ctx.configRef) ctx.configRef.current = body.config;
     setConfig?.(body.config);

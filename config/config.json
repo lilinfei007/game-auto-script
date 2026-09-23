@@ -1,8 +1,10 @@
 {
   "mumu": {
-    "path": "D:/Program Files/Netease/MuMu",
-    "manager": "D:/Program Files/Netease/MuMu/nx_main/MuMuManager.exe",
-    "adb": "D:/Program Files/Netease/MuMu/nx_main/adb.exe",
+    // 安装位置留空 = 自动检测（环境变量 → 注册表 → 常见安装目录 → PATH）。
+    // 详见 src/mumu-detect.mjs；需要固定时再显式填写，例如：
+    //   "path": "D:/Program Files/Netease/MuMuPlayer-12.0",
+    //   "manager": "D:/Program Files/Netease/MuMuPlayer-12.0/nx_main/MuMuManager.exe",
+    //   "adb": "D:/Program Files/Netease/MuMuPlayer-12.0/nx_device/12.0/shell/adb.exe"
     "basePort": 16384,
     "portStep": 32
   },

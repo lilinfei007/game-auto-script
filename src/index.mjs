@@ -56,6 +56,7 @@ import {
   decideEntries,
 } from './cli-args.mjs';
 import { run } from './util/exec.mjs';
+import { adbPath as resolveAdbPath, describeMumu, getMumuDetection } from './mumu-detect.mjs';
 import { spawn } from 'node:child_process';
 import { startWebServer } from './web.mjs';
 import {
@@ -116,6 +117,11 @@ async function cmdDoctor(config, warnings, logger, args = {}) {
   // 3. 配置
   record('配置文件', fs.existsSync(PATHS.configFile), PATHS.configFile, false);
   for (const w of warnings) logger.warn(`  配置提示：${w}`);
+
+  // 3b. MuMu 安装位置（自动检测的结果单独报一行，路径不对时一眼能看出是「没找到」还是「找错了」）
+  record('MuMu 位置', Boolean(config.mumu.manager), describeMumu(config), true);
+  const det = getMumuDetection();
+  if (det) logger.debug(`  MuMu 自动检测：${det.source}，填入 ${det.filled.join(' / ')}`);
 
   // 4. OCR 模型
   const ocr = checkOcrModel();
@@ -210,7 +216,7 @@ async function cmdDoctor(config, warnings, logger, args = {}) {
 
   // 10. 游戏包名
   const pkg = config.game.package;
-  const res = await run(config.mumu.adb, ['-s', ready.address, 'shell', 'pm', 'list', 'packages'], {
+  const res = await run(resolveAdbPath(config), ['-s', ready.address, 'shell', 'pm', 'list', 'packages'], {
     timeoutMs: 20000,
   });
   const packages = (res.stdout || '')
@@ -285,6 +291,10 @@ async function cmdDoctor(config, warnings, logger, args = {}) {
 
 function cmdList(config) {
   const logger = createLogger('list');
+  logger.info('=== MuMu ===');
+  logger.info(`  ${describeMumu(config)}`);
+  logger.info(`  adb 端口约定：basePort=${config.mumu.basePort} + step=${config.mumu.portStep} × 实例号`);
+
   logger.info('=== 实例 ===');
   for (const inst of config.instances) {
     const { address } = resolveInstance(config, inst.index);
@@ -673,6 +683,8 @@ async function runDoctorChecks(config, logger) {
   add('MaaFramework 版本', version === 'v5.13.1', version);
 
   add('配置文件', fs.existsSync(PATHS.configFile), PATHS.configFile);
+
+  add('MuMu 位置', Boolean(config.mumu.manager), describeMumu(config));
 
   const ocr = checkOcrModel();
   add('OCR 模型', ocr.ok, ocr.ok ? ocr.dir : `缺少 ${ocr.missing.join(', ')}`);

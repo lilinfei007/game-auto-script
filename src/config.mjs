@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LEVELS } from './util/log.mjs';
+import { applyMumuDetection } from './mumu-detect.mjs';
 
 /** 允许的日志等级（单一来源：util/log.mjs）。 */
 export const LOG_LEVELS = Object.keys(LEVELS);
@@ -42,9 +43,12 @@ export const PACKAGE_PLACEHOLDER = 'TODO_SET_ME';
 
 export const DEFAULT_CONFIG = {
   mumu: {
-    path: 'D:/MuMu',
-    manager: 'D:/MuMu/nx_main/MuMuManager.exe',
-    adb: 'D:/MuMu/nx_main/adb.exe',
+    // 留空 = 自动检测（环境变量 → 注册表 → 常见安装目录 → PATH）。
+    // 写死了会把「某台机器的路径」带进入库的 config.json，换机器就得手改。
+    // 需要固定时再显式填，显式值永远优先于检测结果。见 src/mumu-detect.mjs
+    path: '',
+    manager: '',
+    adb: '',
     basePort: 16384,
     portStep: 32,
   },
@@ -79,8 +83,12 @@ function deepMerge(base, override) {
 /**
  * 读取并校验配置。文件不存在时返回默认配置（并标记 created=false）。
  *
+ * MuMu 的三条路径留空时会在这一步自动检测补上（只填空值）。
+ *
  * @param {object} [options]
  * @param {boolean} [options.strictPaths=false] 路径不存在算错误（doctor 用）
+ * @param {boolean} [options.detectMumu=true] 是否自动检测 MuMu 路径（测试可关掉）
+ * @param {object} [options.mumuDetect] 透传给 detectMumu 的选项（测试可注入候选目录）
  * @returns {{ config: object, exists: boolean, errors: string[], warnings: string[] }}
  */
 export function loadConfig(options = {}) {
@@ -100,6 +108,7 @@ export function loadConfig(options = {}) {
   }
 
   const config = deepMerge(DEFAULT_CONFIG, raw);
+  if (options.detectMumu !== false) applyMumuDetection(config, options.mumuDetect ?? {});
   const { errors: verrs, warnings: vwarns } = validateConfig(config, options);
   errors.push(...verrs);
   warnings.push(...vwarns);
@@ -130,20 +139,25 @@ export function validateConfig(config, options = {}) {
   const pathIssue = (msg) => (strictPaths ? errors.push(msg) : warnings.push(msg));
 
   // --- 校验 mumu ---
-  if (!config.mumu?.path) {
-    errors.push('mumu.path 未设置');
-  } else if (!fs.existsSync(config.mumu.path)) {
-    pathIssue(`找不到 MuMu 安装目录: ${config.mumu.path}`);
+  //
+  // 路径留空 = 自动检测没找到。这**只给警告**，不是错误：没装模拟器的机器
+  // 也要能用界面 / `list` / `run --dry-run`，真正的拦截交给 doctor 的实连检查。
+  // 反过来，用户**显式写了**却不存在的路径要给重话 —— 那多半是打错了。
+  const missingMumu = ['path', 'manager', 'adb'].filter((k) => !config.mumu?.[k]);
+  if (missingMumu.length > 0) {
+    warnings.push(
+      `未自动检测到 MuMu（缺 ${missingMumu.join(' / ')}）。` +
+        '确认已安装 MuMu；或设置环境变量 MUMU_PATH（安装目录）/ MUMU_MANAGER（MuMuManager.exe），' +
+        '或在 config/config.json 里显式填写 mumu.manager 与 mumu.adb',
+    );
   }
-  if (!config.mumu?.manager) {
-    errors.push('mumu.manager 未设置');
-  } else if (!fs.existsSync(config.mumu.manager)) {
-    pathIssue(`找不到 MuMuManager.exe: ${config.mumu.manager}`);
-  }
-  if (!config.mumu?.adb) {
-    errors.push('mumu.adb 未设置');
-  } else if (!fs.existsSync(config.mumu.adb)) {
-    pathIssue(`找不到 adb.exe: ${config.mumu.adb}`);
+  for (const [key, label] of [
+    ['path', 'MuMu 安装目录'],
+    ['manager', 'MuMuManager.exe'],
+    ['adb', 'adb.exe'],
+  ]) {
+    const value = config.mumu?.[key];
+    if (value && !fs.existsSync(value)) pathIssue(`找不到 ${label}: ${value}`);
   }
   if (
     !Number.isInteger(config.mumu?.basePort) ||

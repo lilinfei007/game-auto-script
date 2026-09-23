@@ -133,6 +133,13 @@ onMounted(() => {
     <div v-if="!config" class="empty">读取中…</div>
     <template v-else>
       <p class="panel-sub mono-sm wrap-anywhere">{{ config.file }}</p>
+      <p v-if="config.mumu" class="panel-sub">
+        MuMu 位置：<span class="mono-sm wrap-anywhere">{{ config.mumu.text }}</span>
+      </p>
+      <p v-if="config.mumu?.detection" class="panel-sub">
+        自动检测来源：{{ config.mumu.detection.source }}（填入 {{ config.mumu.detection.filled.join(' / ') }}）。
+        自动填的路径不会写回文件，保存后仍然按机器重新检测。
+      </p>
       <div v-if="(config.errors || []).length" class="errors">{{ config.errors.join('\n') }}</div>
       <div v-if="(config.warnings || []).length" class="warnings">{{ config.warnings.join('\n') }}</div>
       <textarea v-model="configText" rows="20" spellcheck="false" style="margin-top: 8px" />

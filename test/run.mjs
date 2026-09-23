@@ -16,6 +16,7 @@ ensureDebugDirs();
 fs.mkdirSync(PATHS.configBackups, { recursive: true });
 
 import './core.test.mjs';
+import './mumu-detect.test.mjs';
 import './util.test.mjs';
 import './foundation.test.mjs';
 import './web.test.mjs';

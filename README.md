@@ -125,6 +125,7 @@ src/
   config.mjs        配置加载、校验、实例→端口映射、运行时参数覆盖
   runtime.mjs       MaaFramework 全局选项初始化（CLI 与 tools 共用）
   device.mjs        MuMu 实例生命周期（MuMuManager）+ adb 健康检查
+  mumu-detect.mjs   MuMu 安装位置自动定位（环境变量 / 注册表 / 常见目录 / PATH）
   controller.mjs    AdbController 创建、EmulatorExtras 掩码与 extras 注入、截图
   resource.mjs      资源包加载 + 自定义识别/动作注册
   runner.mjs        Tasker 编排、事件日志、失败留证、单步超时
@@ -175,9 +176,11 @@ test/                     单元测试（npm test）
 ```jsonc
 {
   "mumu": {
-    "path": "D:/MuMu",
-    "manager": "D:/MuMu/nx_main/MuMuManager.exe",
-    "adb": "D:/MuMu/nx_main/adb.exe",
+    // 安装位置**留空即自动检测**，见下面「MuMu 装在哪不用你填」。
+    // 只有想固定下来时才写这三条：
+    // "path": "D:/MuMu",
+    // "manager": "D:/MuMu/nx_main/MuMuManager.exe",
+    // "adb": "D:/MuMu/nx_main/adb.exe",
     "basePort": 16384,     // 实例 0 的 adb 端口
     "portStep": 32         // 每多开一个实例端口递增 32
   },
@@ -197,6 +200,33 @@ test/                     单元测试（npm test）
 
 **多开**：在 `instances` 里追加 `{ "index": 1, "enabled": true, "tasks": [...] }`，
 端口自动算成 `16384 + 32 × 1 = 16416`，无需改代码。
+
+### MuMu 装在哪不用你填
+
+`mumu.path` / `manager` / `adb` 留空时会在启动阶段**自动定位**（`src/mumu-detect.mjs`），
+按下面的顺序找，命中即止：
+
+| 顺序 | 来源 |
+|---|---|
+| 1 | 环境变量 `MUMU_PATH`（安装目录）、`MUMU_MANAGER`、`MUMU_ADB`（具体文件） |
+| 2 | 注册表：卸载项里的 `InstallLocation` / `UninstallString`，以及 `SOFTWARE\Netease` 下的路径值 |
+| 3 | 常见安装目录：各盘符的盘根、`Program Files[\Netease]`、`Games`、`%LOCALAPPDATA%`、`%APPDATA%`、`%ProgramData%` 下名字含 mumu 的目录 |
+| 4 | `where MuMuManager.exe`（装在 PATH 上的少数情况） |
+
+MuMu 6 与 MuMu Player 12 的目录结构不一样（`emulator\nemu\vmonitor\bin` vs `nx_main`），
+两套都认；adb 优先用 MuMu 自带的那个，找不到就交给 PATH 上的 `adb`。
+
+几个要点：
+
+- **显式配置永远优先**。你在 `config/config.json` 里写了哪条，就用哪条，绝不被覆盖；
+  写了 `path` 或 `manager` 中的任意一条后，也**不会**再去别处找另一套拼进来。
+- **自动检测的路径不会写回文件**。界面里点「保存」时，凡是自动填进去、你也没改过的
+  路径都会被剔除 —— 否则点一次保存就把本机路径固化进入库的 `config.json` 了。
+  想固定下来，就手动在 `config/config.json` 里写（或设置上面的环境变量）。
+- 想确认它到底找到了哪一套：`npm run doctor` 的「MuMu 位置」一行会写明**来源**，
+  `npm run list` 与界面「设备与配置」面板也会显示。
+- 找不到时**不会**挡住启动（界面、`list`、`run --dry-run` 都不需要模拟器），
+  只给一条警告；真正需要模拟器的命令会明确报错。
 
 ---
 
@@ -279,6 +309,8 @@ test/                     单元测试（npm test）
 | `spawn EPERM` | 受限环境禁止进程使用命名管道。`src/util/exec.mjs` 会自动降级为文件描述符模式，无需处理 |
 | `node --test test/` 报 `spawn EPERM` | Node 自带 test runner 会为每个文件 spawn 子进程。本项目改用 `node test/run.mjs` 同进程运行 |
 | `cannot connect to 127.0.0.1:16384 ... 10061` | 模拟器未运行或被关闭。`doctor` 会自动拉起；运行期出现说明实例中途挂了 |
+| `MuMu 位置` 报「未找到 MuMuManager.exe」 | 自动检测没命中（装在很偏的目录、绿色版、或注册表里没有）。`MUMU_PATH=你的安装目录 npm run doctor` 试一次，或直接在 `config/config.json` 里显式写 `mumu.manager` |
+| `MuMu 位置` 找错了另一套 MuMu | 装了多个版本。显式写 `mumu.manager` / `mumu.path` 固定下来即可（显式值优先于自动检测） |
 | `Failed to load det or rec` | OCR 模型缺失，运行 `npm run fetch-assets` |
 | 识别一直不命中 | 截图短边与模板基准不一致（`doctor` 会提示）；或游戏更新换皮，需改 `expected` 或重裁模板 |
 | `npm install` 报 `EPERM ... npm-cache` | 环境变量 `npm_config_cache` 指向了不可写目录，改用 `npm install --cache ./.npm-cache` |

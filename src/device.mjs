@@ -21,6 +21,7 @@
  *      不同 MuMu 版本/子命令不一致，两种都要认。
  */
 import { run, extractJsonValues } from './util/exec.mjs';
+import { adbPath as resolveAdbPath } from './mumu-detect.mjs';
 
 /** 取第一个「不是 undefined/null」的值。 */
 function pick(...values) {
@@ -179,7 +180,7 @@ export async function adbConnect(config, index, logger) {
 
 /** 用 adb 直接验证设备可响应（比 adb devices 列表更可靠）。 */
 export async function adbAlive(config, address, logger) {
-  const res = await run(config.mumu.adb, ['-s', address, 'shell', 'echo', 'ok'], {
+  const res = await run(resolveAdbPath(config), ['-s', address, 'shell', 'echo', 'ok'], {
     timeoutMs: 15000,
   });
   const ok = res.ok && res.stdout.includes('ok');
